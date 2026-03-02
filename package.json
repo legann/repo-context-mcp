@@ -1,0 +1,54 @@
+{
+  "name": "repo-context",
+  "version": "0.1.0",
+  "description": "Structured & semantic repo context over MCP for AI agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "repo",
+    "typescript"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "REPO_CONTEXT_VERBOSE=1 tsx src/index.ts",
+    "mcp": "tsx src/mcp/index.ts",
+    "mcp:http": "tsx src/mcp/index.ts --http",
+    "dump": "tsx src/dump/index.ts",
+    "test": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.config.cjs",
+    "test:unit": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.config.cjs --testPathIgnorePatterns=integration",
+    "test:integration": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.config.cjs --testPathPattern=integration",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.27.1",
+    "js-yaml": "4.1.1",
+    "ts-morph": "24.0.0",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@types/jest": "30.0.0",
+    "@types/node": "20.19.35",
+    "@typescript-eslint/eslint-plugin": "8.56.1",
+    "@typescript-eslint/parser": "8.56.1",
+    "eslint": "9.39.3",
+    "jest": "30.2.0",
+    "ts-jest": "29.4.6",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/legann/repo-context-mcp.git"
+  },
+  "homepage": "https://github.com/legann/repo-context-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/legann/repo-context-mcp/issues"
+  }
+}

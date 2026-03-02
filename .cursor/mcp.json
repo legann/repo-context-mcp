@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "repo-context-stdio": {
+      "command": "npm",
+      "args": ["run", "mcp", "--silent"]
+    },
+    "repo-context-http": {
+      "url": "http://localhost:3334"
+    }
+  }
+}

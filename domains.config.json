@@ -1,0 +1,28 @@
+{
+  "domainAliases": {
+    "infra-k8s": ["infra-kubernetes", "k8s", "kubernetes"]
+  },
+  "patterns": [
+    { "pattern": "\\b(auth|oauth|session|login|token|jwt)\\b", "domain": "auth" },
+    { "pattern": "\\b(api|fetch|http|client|request)\\b", "domain": "api" },
+    { "pattern": "\\b(store|zustand|state|slice|reducer)\\b", "domain": "store" },
+    { "pattern": "\\b(db|database|table|query|migration)\\b", "domain": "database" },
+    { "pattern": "\\b(tenant|admin|role|permission)\\b", "domain": "tenant" },
+    { "pattern": "\\b(websocket|ws|realtime|subscription)\\b", "domain": "realtime" },
+    { "pattern": "\\b(sqs|queue|event|sns|messaging)\\b", "domain": "messaging" },
+    { "pattern": "\\b(email|notification|ses)\\b", "domain": "email" },
+    { "pattern": "\\b(secret|encrypt|kms|ssm)\\b", "domain": "secrets" },
+    { "pattern": "\\b(i18n|intl|locale|translation|lang)\\b", "domain": "i18n" },
+    { "pattern": "\\b(validation|validator|schema|zod|yup)\\b", "domain": "validation" },
+    { "pattern": "\\b(config|env|settings|constants)\\b", "domain": "config" },
+    { "pattern": "\\b(types|interfaces|d\\.ts)\\b", "domain": "types" },
+    { "pattern": "\\b(utils|helpers|lib|shared)\\b", "domain": "utils" },
+    { "pattern": "\\b(components|ui|view|layout)\\b", "domain": "ui" },
+    { "pattern": "\\b(hooks)\\b", "domain": "hooks" },
+    { "pattern": "\\b(test|spec|__tests__|jest|vitest)\\b", "domain": "testing" },
+    { "pattern": "\\b(dashboard|widget|chart)\\b", "domain": "dashboard" },
+    { "pattern": "^infrastructure/sam", "domain": "infra-sam" },
+    { "pattern": "^infrastructure/k8s-ec2", "domain": "infra-k8s" },
+    { "pattern": "^infrastructure/helm", "domain": "infra-helm" }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "server": {
+    "port": 3334,
+    "host": "127.0.0.1"
+  },
+  "scan": {
+    "ignorePatterns": []
+  },
+  "verbose": false
+}

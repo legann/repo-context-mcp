@@ -1,0 +1,47 @@
+---
+description: Use the Repo Context MCP server for repository structure, dependencies, and semantic context
+globs:
+alwaysApply: true
+---
+
+# Repo Context — quick reference
+
+## ⛔ STOP — before doing anything in a non-trivial task
+
+**First action: call MCP. Do not read files first.**
+
+Call `get_domain_or_focus_context` (or `get_domain_modules_slice`) to get the module map, exports, dependencies, and annotations. This tells you **what to read and where**. Skip only for trivial single-file tasks.
+
+If the call fails (connection error) — the MCP server is not running. **Stop and ask the user to start it** (`cd repo-context && npm run mcp`). Do not fall back to reading files — without the graph you lack structure and dependency info.
+
+---
+
+MCP server **repo-context** provides **structure** (packages, modules, dependency graph, domains, **infra modules and services** — SAM, K8s, Helm, Dockerfile — with Lambda→code links) and **semantic annotations** (summary, assumptions, risks, sideEffects). **Domain aliases** (e.g. query by `kubernetes` or `k8s` → `infra-k8s`) are resolved from `domains.config.json`.
+
+## How to call
+
+**Server id:** Find the entry containing `repo-context` in `mcp_file_system_servers` (provided in your system prompt). Pattern: `project-*-repo-context-stdio`.
+
+```
+CallMcpTool(server: "<server id from mcp_file_system_servers matching repo-context>", toolName: "get_domain_modules_slice", arguments: { "domainTag": "auth" })
+```
+
+**Always pass `arguments` as valid JSON.** Missing or malformed `arguments` (e.g. `{ domainTag: "auth" }` without quotes) causes server crash. Use `{ "domainTag": "auth" }`.
+
+## Cheat sheet
+
+1. **Map** — `get_domain_modules_slice` or `get_domain_or_focus_context` for the domain.
+2. **Detail** — `get_context_detail` (no body) on 3–5 key modules; use **semantic** and **drill_down** to decide what to read.
+3. **Then read** — only after that: `includeBody` / `grepBody` / Read by lineRange.
+4. **Before changing types** — `get_dependency_impact` on the types module (see downstream and `uses[]`).
+5. **Before adding env vars** — `get_env_vars_usage` (optionally `packageId`).
+6. **After you edit files** — if you need up-to-date structure/exports for the next step, call `refresh_repo_context` before `get_context_detail` / `get_domain_*` (graph is in-memory; rebuild via `refresh_repo_context` when needed).
+7. **Infra** — domains `infra-sam`, `infra-k8s`, `infra-helm`, `infra-dockerfile` list IaC modules and service nodes; Lambda services link to code via edge `infra`. Use domain tag `infra-k8s` (or alias `kubernetes` / `k8s`) to get K8s/Helm/k3d context.
+
+## Security
+
+Do not store secrets in the graph or annotations. Repo-context extracts only **env var names** from source; it never reads `.env` or env files.
+
+---
+
+**Full reference:** all tools, workflow, file size rules, semantic annotation, limitations — see **repo-context-reference** rule or `.cursor/rules/repo-context-reference.mdc`.
