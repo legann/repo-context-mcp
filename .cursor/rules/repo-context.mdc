@@ -16,7 +16,7 @@ If the call fails (connection error) — the MCP server is not running. **Stop a
 
 ---
 
-MCP server **repo-context** provides **structure** (packages, modules, dependency graph, domains, **infra modules and services** — SAM, K8s, Helm, Dockerfile — with Lambda→code links) and **semantic annotations** (summary, assumptions, risks, sideEffects). **Domain aliases** (e.g. query by `kubernetes` or `k8s` → `infra-k8s`) are resolved from `domains.config.json`.
+MCP server **repo-context** provides **structure** (packages, modules, dependency graph, domains with **tier classification** and **subdomains**, **infra modules and services** — SAM, K8s, Helm, Dockerfile — with Lambda→code links and **runtime topology**: triggers, resource refs, data flows) and **semantic annotations** (summary, assumptions, risks, sideEffects) with **quality scoring**. **Domain aliases** (e.g. query by `kubernetes` or `k8s` → `infra-k8s`) are resolved from `domains.config.json`.
 
 ## How to call
 
@@ -30,13 +30,15 @@ CallMcpTool(server: "<server id from mcp_file_system_servers matching repo-conte
 
 ## Cheat sheet
 
-1. **Map** — `get_domain_modules_slice` or `get_domain_or_focus_context` for the domain.
-2. **Detail** — `get_context_detail` (no body) on 3–5 key modules; use **semantic** and **drill_down** to decide what to read.
+1. **Map** — `get_domain_or_focus_context` for domain overview (includes `tier`, `subdomains`); `get_domain_modules_slice` for full module list.
+2. **Detail** — `get_context_detail` (no body) on 3–5 key modules; use **semantic** (with **quality** score) and **drill_down** to decide what to read.
 3. **Then read** — only after that: `includeBody` / `grepBody` / Read by lineRange.
 4. **Before changing types** — `get_dependency_impact` on the types module (see downstream and `uses[]`).
 5. **Before adding env vars** — `get_env_vars_usage` (optionally `packageId`).
-6. **After you edit files** — if you need up-to-date structure/exports for the next step, call `refresh_repo_context` before `get_context_detail` / `get_domain_*` (graph is in-memory; rebuild via `refresh_repo_context` when needed).
-7. **Infra** — domains `infra-sam`, `infra-k8s`, `infra-helm`, `infra-dockerfile` list IaC modules and service nodes; Lambda services link to code via edge `infra`. Use domain tag `infra-k8s` (or alias `kubernetes` / `k8s`) to get K8s/Helm/k3d context.
+6. **Cross-package deps** — `get_cross_package_dependencies` for inter-package import analysis with symbol details and boundary violations.
+7. **Runtime topology** — `get_runtime_topology` for Lambda triggers (API/SQS/Schedule), resource usage, and data flows between services.
+8. **After you edit files** — call `refresh_repo_context` (now reports **orphaned annotations** count); use `get_orphaned_annotations` / `cleanup_orphaned_annotations` if needed.
+9. **Infra** — domains `infra-sam`, `infra-k8s`, `infra-helm`, `infra-dockerfile` list IaC modules and service nodes; Lambda services link to code via edge `infra`. Use domain tag `infra-k8s` (or alias `kubernetes` / `k8s`) to get K8s/Helm/k3d context.
 
 ## Security
 

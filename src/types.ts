@@ -123,6 +123,21 @@ export type InfraResourceKind =
   | 'helm-release'
   | 'other';
 
+export interface InfraTrigger {
+  name: string;
+  type: 'api' | 'sqs' | 'schedule' | 'websocket' | 'other';
+  method?: string;
+  path?: string;
+  schedule?: string;
+  queueRef?: string;
+}
+
+export interface InfraEnvRef {
+  varName: string;
+  refType: 'ref' | 'getatt' | 'sub' | 'literal';
+  targetLogicalId?: string;
+}
+
 export interface InfraResource {
   id: string;
   kind: InfraResourceKind;
@@ -130,6 +145,8 @@ export interface InfraResource {
   attributes: Record<string, string>;
   envVars?: string[];
   links?: string[];
+  triggers?: InfraTrigger[];
+  envRefs?: InfraEnvRef[];
 }
 
 export interface InfraModuleInfo {
@@ -182,12 +199,19 @@ export interface CapabilityNodeData {
   isDefault?: boolean;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- discriminant for NodeDataByType
-export interface DomainNodeData {}
+export type DomainTier = 'business' | 'feature' | 'layer' | 'technical';
+
+export interface DomainNodeData {
+  tier?: DomainTier;
+  parent?: string;
+  subdomains?: string[];
+}
 
 export interface ServiceNodeData {
   handler?: string;
   envVars?: string[];
+  triggers?: InfraTrigger[];
+  envRefs?: InfraEnvRef[];
 }
 
 export type NodeDataByType = {

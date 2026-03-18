@@ -40,6 +40,55 @@ const AnnotationFileSchema = z.object({
 
 export { SemanticAnnotationSchema };
 
+// ── Annotation quality scoring ──
+
+export interface AnnotationQuality {
+  score: number;
+  missingFields: string[];
+  tier: 'minimal' | 'basic' | 'detailed' | 'comprehensive';
+}
+
+export function computeAnnotationQuality(
+  semantic: StoredAnnotation['semantic'],
+  moduleData: { exportCount: number; lineCount: number; envVars?: string[] },
+): AnnotationQuality {
+  let score = 0;
+  const missing: string[] = [];
+
+  if (semantic.summary && semantic.summary.length > 20) score += 1;
+  else missing.push('summary (>20 chars)');
+
+  if (semantic.keyExports && Object.keys(semantic.keyExports).length > 0) score += 1.5;
+  else if (moduleData.exportCount > 0) missing.push('keyExports');
+
+  if (semantic.assumptions?.length) score += 0.5;
+  else missing.push('assumptions');
+
+  if (semantic.dataFlow) score += 2;
+  else if (moduleData.lineCount > 200) missing.push('dataFlow');
+
+  if (semantic.sideEffects?.length) score += 1;
+  else if (moduleData.envVars?.length) missing.push('sideEffects');
+
+  if (semantic.risks?.length) score += 1;
+  else if (moduleData.lineCount > 500) missing.push('risks');
+
+  if (semantic.patterns?.length) score += 1;
+
+  if (semantic.integrationPoints) score += 1;
+  else if (moduleData.exportCount > 5) missing.push('integrationPoints');
+
+  if (semantic.envDependencies && Object.keys(semantic.envDependencies).length > 0) score += 1;
+  else if (moduleData.envVars?.length) missing.push('envDependencies');
+
+  const tier = score >= 8 ? 'comprehensive'
+    : score >= 5 ? 'detailed'
+    : score >= 2 ? 'basic'
+    : 'minimal';
+
+  return { score: Math.min(10, score), missingFields: missing, tier };
+}
+
 interface AnnotationFile {
   version: number;
   annotations: Record<string, StoredAnnotation>;
@@ -48,11 +97,14 @@ interface AnnotationFile {
 const SAVE_DEBOUNCE_MS = 800;
 const MAX_SAVE_RETRIES = 3;
 
+const MAX_BACKUPS = 5;
+
 export class AnnotationStore {
   private filePath: string;
   private data: Record<string, StoredAnnotation> = {};
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private _lastSaveError: string | null = null;
+  private lastFlushedCount: number | null = null;
 
   private constructor(filePath: string) {
     this.filePath = filePath;
@@ -198,7 +250,44 @@ export class AnnotationStore {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    this.maybeBackup();
     this.saveSync();
+    this.lastFlushedCount = Object.keys(this.data).length;
+  }
+
+  private maybeBackup(): void {
+    const currentCount = Object.keys(this.data).length;
+    const previousCount = this.lastFlushedCount ?? currentCount;
+    if (previousCount > 0 && (previousCount - currentCount) / previousCount > 0.05) {
+      try {
+        if (fs.existsSync(this.filePath)) {
+          const dir = path.dirname(this.filePath);
+          const backupPath = path.join(
+            dir,
+            `annotations.backup.${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+          );
+          fs.copyFileSync(this.filePath, backupPath);
+          console.log(`  Annotation backup created: ${backupPath}`);
+          this.rotateBackups(dir);
+        }
+      } catch (e) {
+        console.error(`  [WARN] Failed to create annotation backup: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  private rotateBackups(dir: string): void {
+    try {
+      const backups = fs.readdirSync(dir)
+        .filter(f => f.startsWith('annotations.backup.') && f.endsWith('.json'))
+        .sort()
+        .reverse();
+      for (let i = MAX_BACKUPS; i < backups.length; i++) {
+        fs.unlinkSync(path.join(dir, backups[i]));
+      }
+    } catch {
+      // best-effort rotation
+    }
   }
 
   get(nodeId: string): StoredAnnotation | undefined {
@@ -220,6 +309,77 @@ export class AnnotationStore {
 
   getAll(): Record<string, StoredAnnotation> {
     return this.data;
+  }
+
+  /** Delete specific annotation entries by node id. Returns number deleted. */
+  delete(nodeIds: string[]): number {
+    let count = 0;
+    for (const id of nodeIds) {
+      if (id in this.data) {
+        delete this.data[id];
+        count++;
+      }
+    }
+    if (count > 0) this.scheduleSave();
+    return count;
+  }
+
+  get dataEntries(): Record<string, StoredAnnotation> {
+    return this.data;
+  }
+
+  detectOrphaned(graph: SemanticGraph): {
+    total: number;
+    orphaned: Array<{
+      nodeId: string;
+      nodeType: string;
+      pass: number;
+      updatedAt: string;
+      summaryPreview: string;
+      reason: 'node_missing' | 'node_type_changed';
+    }>;
+    byType: Record<string, number>;
+  } {
+    const orphaned: Array<{
+      nodeId: string;
+      nodeType: string;
+      pass: number;
+      updatedAt: string;
+      summaryPreview: string;
+      reason: 'node_missing' | 'node_type_changed';
+    }> = [];
+    const byType: Record<string, number> = {};
+
+    for (const [nodeId, ann] of Object.entries(this.data)) {
+      const graphNode = graph.nodes.get(nodeId);
+      if (!graphNode) {
+        orphaned.push({
+          nodeId,
+          nodeType: ann.nodeType,
+          pass: ann.pass,
+          updatedAt: ann.updatedAt,
+          summaryPreview: (ann.semantic?.summary ?? '').slice(0, 100),
+          reason: 'node_missing',
+        });
+        byType[ann.nodeType] = (byType[ann.nodeType] ?? 0) + 1;
+      } else if (graphNode.type !== ann.nodeType) {
+        orphaned.push({
+          nodeId,
+          nodeType: ann.nodeType,
+          pass: ann.pass,
+          updatedAt: ann.updatedAt,
+          summaryPreview: (ann.semantic?.summary ?? '').slice(0, 100),
+          reason: 'node_type_changed',
+        });
+        byType[ann.nodeType] = (byType[ann.nodeType] ?? 0) + 1;
+      }
+    }
+
+    return {
+      total: orphaned.length,
+      orphaned: orphaned.sort((a, b) => b.pass - a.pass),
+      byType,
+    };
   }
 
   /**
@@ -291,13 +451,32 @@ export class AnnotationStore {
           ...(e.signature ? { signature: e.signature } : {}),
         }));
 
-      const priority = (status === 'stale' ? 1000 : 0) + downstreamCount;
+      const qualityScore = ann
+        ? computeAnnotationQuality(ann.semantic, {
+            exportCount: mod.exports.length,
+            lineCount: maxLine,
+            envVars: mod.contentHints?.envVars,
+          }).score
+        : 0;
+      const priority = (status === 'stale' ? 1000 : 0)
+        + (downstreamCount * 2)
+        + mod.exports.length
+        + (maxLine / 200)
+        - (qualityScore * 3);
       const staleReason = schemaOutdated && !contentStale
         ? `Schema outdated (v${ann?.schemaVersion ?? 1} < v${CURRENT_ANNOTATION_SCHEMA_VERSION}), needs backfill (${downstreamCount} downstream deps)`
         : contentStale
           ? `Content changed since last annotation (${downstreamCount} downstream deps)`
           : `Stale (${downstreamCount} downstream deps)`;
       const reason = status === 'stale' ? staleReason : `Not yet annotated (${downstreamCount} downstream deps, ${mod.exports.length} exports)`;
+
+      const recommendedFields = ann
+        ? computeAnnotationQuality(ann.semantic, {
+            exportCount: mod.exports.length,
+            lineCount: maxLine,
+            envVars: mod.contentHints?.envVars,
+          }).missingFields
+        : ['summary', 'keyExports', 'assumptions'];
 
       items.push({
         nodeId: mod.id,
@@ -312,6 +491,7 @@ export class AnnotationStore {
           downstreamCount,
           totalLines: maxLine,
         },
+        ...(recommendedFields.length > 0 ? { recommendedFields } : {}),
       });
     }
 
@@ -442,6 +622,7 @@ export class AnnotationStore {
     infraModules: { total: number; annotated: number; fresh: number; stale: number; unannotated: number };
     services: { total: number; annotated: number; fresh: number; stale: number; unannotated: number };
     byDomain: Record<string, { total: number; annotated: number; fresh: number }>;
+    byTier: Record<string, { domains: string[]; totalModules: number }>;
     domainAnnotations: { totalDomains: number; annotated: number; list: string[] };
   } {
     let annotated = 0;
@@ -531,15 +712,26 @@ export class AnnotationStore {
       }
     }
 
-    // Count domain-level annotations
+    // Count domain-level annotations + tier classification
     const domainNodes = graph.byType.get('domain') ?? new Set<string>();
     let annotatedDomains = 0;
     const domainList: string[] = [];
+    const byTier: Record<string, { domains: string[]; totalModules: number }> = {
+      business: { domains: [], totalModules: 0 },
+      feature: { domains: [], totalModules: 0 },
+      layer: { domains: [], totalModules: 0 },
+      technical: { domains: [], totalModules: 0 },
+    };
     for (const dId of domainNodes) {
+      const dNode = graph.nodes.get(dId);
       if (this.data[dId]) {
         annotatedDomains++;
-        domainList.push(graph.nodes.get(dId)?.label ?? dId);
+        domainList.push(dNode?.label ?? dId);
       }
+      const tier = (dNode?.type === 'domain' && dNode.data?.tier) ? dNode.data.tier : 'technical';
+      const taggedCount = (graph.inEdges.get(dId) ?? []).filter(e => e.kind === 'tagged').length;
+      byTier[tier].domains.push(dNode?.label ?? dId);
+      byTier[tier].totalModules += taggedCount;
     }
 
     return {
@@ -563,6 +755,7 @@ export class AnnotationStore {
         unannotated: serviceIds.length - svcAnnotated,
       },
       byDomain,
+      byTier,
       domainAnnotations: {
         totalDomains: domainNodes.size,
         annotated: annotatedDomains,

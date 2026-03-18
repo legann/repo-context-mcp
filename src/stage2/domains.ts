@@ -4,9 +4,18 @@ import type { SyntacticSnapshot, SemanticGraph, ModuleInfo } from '../types.js';
 import { SELF_TSCONFIG_REL } from '../paths.js';
 
 /** First path segments that are structural — skip when inferring domain from path. */
-const STRUCTURAL_DIRS = new Set([
+export const STRUCTURAL_DIRS = new Set([
+  // Standard project structure
   'src', 'lib', 'libs', 'internal', 'shared', 'common', 'utils', 'core',
   'components', 'hooks', 'pages', 'app', 'features', 'modules', 'services',
+  // Horizontal layers (types, config, state)
+  'types', 'config', 'configs', 'constants', 'store', 'stores',
+  'contexts', 'providers', 'middleware', 'models',
+  // Testing
+  'tests', '__tests__', 'testing', 'mocks', 'fixtures', 'setup',
+  // Clean Architecture / DDD layers
+  'adapters', 'interfaces', 'entities', 'repositories', 'use-cases',
+  'slices', 'queries', 'columns',
 ]);
 
 /**

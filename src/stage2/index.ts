@@ -4,9 +4,12 @@ import type {
   ExportInfo,
   ModuleInfo,
   InfraResource,
+  DomainTier,
 } from '../types.js';
 import { createEmptyGraph, addNode, addEdge } from '../graph/index.js';
-import { collectAllDomainTags } from './domains.js';
+import { collectAllDomainTags, STRUCTURAL_DIRS } from './domains.js';
+
+const STRUCTURAL_DIRS_REF = STRUCTURAL_DIRS;
 
 export function buildSemanticGraph(
   snapshot: SyntacticSnapshot,
@@ -22,6 +25,8 @@ export function buildSemanticGraph(
   pass4Domains(graph, snapshot, modsMap);
   pass5ContentDomains(graph, snapshot);
   pass5PropagateInfraDomains(graph);
+  pass6ClassifyDomains(graph);
+  pass7Subdomains(graph, modsMap);
   logDomains(graph);
   // Node view fields are computed on-demand by buildNodeView
 
@@ -195,6 +200,8 @@ function pass2Infra(
         data: {
           handler: res.attributes.handler,
           envVars: res.envVars,
+          triggers: res.triggers,
+          envRefs: res.envRefs,
         },
       });
       addEdge(graph, infraModuleId, serviceId, 'contains');
@@ -204,6 +211,28 @@ function pass2Infra(
         const modId = resolveHandlerToModuleId(res.attributes.handler, snapshot, modulesById);
         if (modId && graph.nodes.has(modId)) {
           addEdge(graph, serviceId, modId, 'infra');
+        }
+      }
+
+      if (res.triggers) {
+        for (const trigger of res.triggers) {
+          if (trigger.type === 'sqs' && trigger.queueRef) {
+            const queueServiceId = findServiceIdByLogicalId(graph, trigger.queueRef);
+            if (queueServiceId) {
+              addEdge(graph, queueServiceId, serviceId, 'consumes');
+            }
+          }
+        }
+      }
+
+      if (res.envRefs) {
+        for (const envRef of res.envRefs) {
+          if (envRef.targetLogicalId) {
+            const targetServiceId = findServiceIdByLogicalId(graph, envRef.targetLogicalId);
+            if (targetServiceId) {
+              addEdge(graph, serviceId, targetServiceId, 'uses_env');
+            }
+          }
         }
       }
     }
@@ -348,12 +377,158 @@ function pass5ContentDomains(graph: SemanticGraph, snapshot: SyntacticSnapshot):
   }
 }
 
+// ── Pass 7: Subdomains for large domains ──
+
+const SUBDOMAIN_MIN_MODULES = 10;
+const SUBDOMAIN_MIN_CLUSTER = 3;
+
+function pass7Subdomains(graph: SemanticGraph, modulesById: Map<string, ModuleInfo>): void {
+  const domainIds = graph.byType.get('domain');
+  if (!domainIds?.size) return;
+
+  const domainSnapshot = Array.from(domainIds);
+  for (const domainId of domainSnapshot) {
+    const node = graph.nodes.get(domainId);
+    if (!node || node.type !== 'domain') continue;
+    const tier = node.data?.tier;
+    if (tier !== 'business' && tier !== 'feature') continue;
+    if (node.data?.parent) continue;
+
+    const incoming = graph.inEdges.get(domainId) ?? [];
+    const taggedModIds = incoming
+      .filter(e => e.kind === 'tagged')
+      .map(e => e.from)
+      .filter(id => {
+        const n = graph.nodes.get(id);
+        return n?.type === 'module';
+      });
+
+    if (taggedModIds.length < SUBDOMAIN_MIN_MODULES) continue;
+
+    const clusters = clusterByPathPrefix(taggedModIds, modulesById, node.label);
+
+    const subdomains: string[] = [];
+    for (const [subLabel, modIds] of clusters) {
+      if (modIds.length < SUBDOMAIN_MIN_CLUSTER) continue;
+      if (subLabel === node.label) continue;
+
+      const subdomainId = `domain:${node.label}/${subLabel}`;
+      if (graph.nodes.has(subdomainId)) continue;
+
+      addNode(graph, {
+        id: subdomainId,
+        type: 'domain',
+        label: `${node.label}/${subLabel}`,
+        description: `Subdomain: ${node.label}/${subLabel} (${modIds.length} modules)`,
+        data: { tier: 'feature', parent: domainId },
+      });
+      addEdge(graph, subdomainId, domainId, 'tagged');
+      subdomains.push(subdomainId);
+
+      for (const modId of modIds) {
+        addEdge(graph, modId, subdomainId, 'tagged');
+      }
+    }
+
+    if (subdomains.length > 0) {
+      node.data = { ...node.data, subdomains };
+    }
+  }
+}
+
+function clusterByPathPrefix(
+  modIds: string[],
+  modulesById: Map<string, ModuleInfo>,
+  domainLabel: string,
+): Map<string, string[]> {
+  const segmentCounts = new Map<string, string[]>();
+
+  for (const modId of modIds) {
+    const mod = modulesById.get(modId);
+    if (!mod) continue;
+
+    const rel = mod.relativeFilePath.replace(/\.(tsx?|jsx?)$/, '');
+    const parts = rel.split('/');
+
+    const domainIdx = parts.findIndex(p => p.toLowerCase() === domainLabel);
+    const afterDomain = domainIdx >= 0 ? parts.slice(domainIdx + 1) : parts;
+
+    const meaningful = afterDomain.filter(
+      p => !STRUCTURAL_DIRS_REF.has(p.toLowerCase()) && p !== 'index',
+    );
+
+    const subKey = meaningful.length > 0 ? meaningful[0].toLowerCase() : domainLabel;
+    let list = segmentCounts.get(subKey);
+    if (!list) { list = []; segmentCounts.set(subKey, list); }
+    list.push(modId);
+  }
+
+  return segmentCounts;
+}
+
+// ── Pass 6: Classify domain tiers ──
+
+const LAYER_NAMES = new Set([
+  'types', 'utils', 'config', 'configs', 'constants',
+  'index', 'hooks', 'testing', 'tests', 'store', 'stores',
+  'models', 'interfaces', 'entities', 'contexts', 'providers',
+  'routing',
+]);
+
+function classifyDomainTier(domainId: string, graph: SemanticGraph): DomainTier {
+  const node = graph.nodes.get(domainId);
+  if (!node || node.type !== 'domain') return 'technical';
+
+  if (LAYER_NAMES.has(node.label)) return 'layer';
+
+  const incoming = graph.inEdges.get(domainId) ?? [];
+  const taggedModuleIds = incoming.filter(e => e.kind === 'tagged').map(e => e.from);
+  const modules = taggedModuleIds.filter(id => {
+    const n = graph.nodes.get(id);
+    return n?.type === 'module' || n?.type === 'service';
+  });
+
+  const packages = new Set<string>();
+  for (const modId of modules) {
+    const containsEdge = (graph.inEdges.get(modId) ?? []).find(
+      e => e.kind === 'contains' && e.from.startsWith('pkg:'),
+    );
+    if (containsEdge) packages.add(containsEdge.from);
+  }
+
+  if (modules.length >= 5 && packages.size >= 2) return 'business';
+  if (modules.length >= 3 || (modules.length >= 2 && packages.size >= 2)) return 'feature';
+  return 'technical';
+}
+
+function pass6ClassifyDomains(graph: SemanticGraph): void {
+  const domainIds = graph.byType.get('domain');
+  if (!domainIds?.size) return;
+
+  for (const domainId of domainIds) {
+    const node = graph.nodes.get(domainId);
+    if (!node || node.type !== 'domain') continue;
+    const tier = classifyDomainTier(domainId, graph);
+    node.data = { ...node.data, tier };
+  }
+}
+
 // ── Helpers ──
 
 function shortModuleLabel(relPath: string): string {
   const parts = relPath.replace(/\.(tsx?|jsx?)$/, '').split('/');
   if (parts.length <= 2) return parts.join('/');
   return `…/${parts.slice(-2).join('/')}`;
+}
+
+function findServiceIdByLogicalId(graph: SemanticGraph, logicalId: string): string | undefined {
+  const serviceSet = graph.byType.get('service');
+  if (!serviceSet) return undefined;
+  for (const id of serviceSet) {
+    const node = graph.nodes.get(id);
+    if (node?.label === logicalId) return id;
+  }
+  return undefined;
 }
 
 function makeServiceId(res: InfraResource): string {

@@ -52,11 +52,13 @@ export const toolDefs: ToolDef[] = [
     name: 'search_repo_context',
     description:
       'Search for nodes by name, id substring, or type. Multi-word queries (e.g. "Platform OAuth") are tokenized: all tokens must match somewhere in node id, label, or (for capabilities) signature/typeValue/implementsInterfaces. ' +
-      'Returns { query, results: [{ id, label, type, score, children, links }] } sorted by relevance. ' +
+      'Without nodeTypes filter: returns grouped results { domains, modules, services, capabilities } with per-group limits. ' +
+      'With nodeTypes filter: returns flat list of only the specified types. ' +
       'Query is auto-normalized: /index and .ts/.tsx are stripped.',
     schema: z.object({
       query: z.string().describe('Search query (name, id fragment, or type)'),
-      maxResults: z.number().int().min(1).max(200).optional().describe('Max results (default 10)'),
+      maxResults: z.number().int().min(1).max(200).optional().describe('Max results (default 10). For grouped mode: max per group ≈ maxResults/4.'),
+      nodeTypes: z.array(z.enum(['domain', 'module', 'service', 'capability'])).optional().describe('Filter by node types. If provided, returns flat list of only these types. If omitted, returns grouped results by type.'),
     }),
   },
   {
@@ -127,6 +129,31 @@ export const toolDefs: ToolDef[] = [
     }),
   },
   {
+    name: 'get_runtime_topology',
+    description:
+      'Show runtime topology: how services are triggered (API Gateway, SQS, Schedule), what resources they use (DynamoDB tables, SQS queues), ' +
+      'and data flow between Lambda functions through queues and events. ' +
+      'Returns { scope, services: [{ id, label, handler, triggers, resources, publishes }], resources?, dataFlows? }.',
+    schema: z.object({
+      scope: z.string().optional().describe('Filter scope. "all" for full topology. Domain name (e.g. "auth") to filter by domain. Package id to filter by package. Default: "all".'),
+      includeResources: z.boolean().optional().describe('Include DynamoDB tables, SQS queues etc. as resource entries. Default: true.'),
+      includeApiRoutes: z.boolean().optional().describe('Include API Gateway routes in trigger details. Default: true.'),
+    }),
+  },
+  {
+    name: 'get_cross_package_dependencies',
+    description:
+      'Show dependency edges between packages with import counts and key symbols. ' +
+      'Returns { packages, edges: [{ from, to, moduleEdges, topModuleEdges }] }. ' +
+      'Each edge shows how many module-level imports cross the package boundary, and top N examples with imported symbol names. ' +
+      'Optionally detects boundary violations (imports bypassing index/public API).',
+    schema: z.object({
+      packageId: z.string().optional().describe('Filter to edges involving this package (e.g. "pkg:@dexrx/lambda-functions"). Omit for all.'),
+      direction: z.enum(['imports', 'exports', 'both']).optional().describe('"imports" = what packageId imports FROM others. "exports" = what others import FROM packageId. Default: "both".'),
+      topN: z.number().int().min(1).max(20).optional().describe('Max symbol examples per edge. Default: 5.'),
+    }),
+  },
+  {
     name: 'get_modules_annotation_queue',
     description:
       'Get a prioritized queue of modules that need semantic annotation. ' +
@@ -155,6 +182,28 @@ export const toolDefs: ToolDef[] = [
       'Get annotation coverage statistics: total modules, annotated, fresh, stale, unannotated, breakdown by domain. ' +
       'Use to understand how much of the codebase has semantic annotations.',
     schema: z.object({}),
+  },
+  {
+    name: 'get_orphaned_annotations',
+    description:
+      'Detect annotations whose node no longer exists in the graph. ' +
+      'Returns orphaned entries with type, pass count, and summary preview. ' +
+      'Use after refresh_repo_context or structural changes to identify dead annotation entries.',
+    schema: z.object({
+      nodeType: z.enum(['all', 'domain', 'module', 'service', 'capability']).optional().describe('Filter by annotation type. Default: "all".'),
+    }),
+  },
+  {
+    name: 'cleanup_orphaned_annotations',
+    description:
+      'Remove orphaned annotations that reference nodes no longer in the graph. ' +
+      'Run get_orphaned_annotations first to preview. ' +
+      'Mode "preview" = dry run. Mode "remove" = delete orphaned entries (with auto-backup). ' +
+      'Returns { mode, removed/wouldRemove, backupPath? }.',
+    schema: z.object({
+      mode: z.enum(['preview', 'remove']).describe('preview = dry run. remove = delete orphaned entries with backup.'),
+      nodeType: z.enum(['all', 'domain', 'module', 'service']).optional().describe('Filter by type. Default: "all".'),
+    }),
   },
   {
     name: 'refresh_repo_context',

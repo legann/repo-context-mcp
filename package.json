@@ -1,7 +1,7 @@
 {
   "name": "repo-context",
-  "version": "0.1.0",
-  "description": "Structured & semantic repo context over MCP for AI agents",
+  "version": "0.2.0",
+  "description": "Structured & semantic repository context for AI agents over MCP",
   "type": "module",
   "main": "dist/index.js",
   "engines": {

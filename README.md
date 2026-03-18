@@ -16,11 +16,13 @@
 No manual tagging or mapping is required. Repo-context:
 
 1. **Parses the repository** with **ts-morph** to build a syntactic snapshot: imports and exports, function/class/interface signatures (params, return types), and content hints (routes, env vars, conditional UI) extracted from the source.
-2. **Scans infra (IaC)** for SAM/CloudFormation, Helm, Kubernetes, and Dockerfiles.
-3. **Structures the codebase** into a hierarchy: repo → packages → modules → exports (capabilities), plus infra modules and services. Modules and services are tagged with domains (e.g. auth, api, ui, infra-sam, infra-k8s) inferred from paths, import clusters, and optional config (including domain aliases, e.g. `kubernetes` → `infra-k8s`).
-4. **Optionally layers AI annotations** (summaries, assumptions, risks) on top, persisted by node (modules, capabilities, domains, infra modules, services) and kept fresh via content hashes.
+2. **Scans infra (IaC)** for SAM/CloudFormation, Helm, Kubernetes, and Dockerfiles — including **event triggers** (API Gateway, SQS, Schedule) and **environment variable references** (!Ref/!GetAtt to resources).
+3. **Structures the codebase** into a hierarchy: repo → packages → modules → exports (capabilities), plus infra modules and services. Modules and services are tagged with **tiered domains** (`business` | `feature` | `layer` | `technical`) inferred from paths, import clusters, and optional config. Large domains get auto-generated **subdomains** by path prefix clustering. Domain aliases (e.g. `kubernetes` → `infra-k8s`) are supported via config.
+4. **Maps runtime topology** — Lambda triggers, resource usage (DynamoDB, SQS), and data flows between services through queues.
+5. **Layers AI annotations** (summaries, assumptions, risks) on top, persisted by node and kept fresh via content hashes. Annotation **quality scoring** (0–10) identifies gaps; an annotation queue prioritizes modules by downstream impact and quality.
+6. **Manages annotation lifecycle** — detects orphaned annotations after structural changes, supports preview/cleanup with auto-backup.
 
-You get a single, queryable view of the repository - by domain, by module, by impact, or by annotation coverage.
+You get a single, queryable view of the repository — by domain, by module, by impact, by runtime topology, or by annotation quality.
 
 **In-memory runtime:** Repository context is built and held **in memory**. The server builds once at startup and again when you call the MCP tool `refresh_repo_context` (e.g. after code changes).
 
@@ -28,7 +30,7 @@ You get a single, queryable view of the repository - by domain, by module, by im
 
 ## Architecture
 
-Repository context is built in three stages: **syntactic snapshot** (ts-morph parse + infra IaC scan) → **semantic graph** (packages, modules, capabilities, domains, infra modules and services, Lambda→code links) → **semantic annotations** (AI-generated, optional). See [ARCHITECTURE.md](ARCHITECTURE.md) for details.
+Repository context is built in three stages: **syntactic snapshot** (ts-morph parse + infra IaC scan with triggers/resource refs) → **semantic graph** (packages, modules, capabilities, tiered domains with subdomains, infra services, runtime topology) → **semantic annotations** (AI-generated, quality-scored, with orphan management). See [ARCHITECTURE.md](ARCHITECTURE.md) for details.
 
 ---
 
@@ -36,22 +38,48 @@ Repository context is built in three stages: **syntactic snapshot** (ts-morph pa
 
 The server exposes these tools (call via MCP with the appropriate server id and `arguments`):
 
+### Navigation & Context
+
 | Tool | Purpose |
 |------|--------|
-| `get_domain_or_focus_context` | Context by domain or focus id (modules, structure). |
-| `get_domain_modules_slice` | Modules (and optionally consumers) for a domain tag. |
-| `get_context_detail` | Detailed context for a module/export/domain (by id): drill_down, optional body, grepBody, includePrivate; plus semantic annotation if present and fresh. |
+| `get_domain_or_focus_context` | Context by domain or focus id — modules, tier, subdomains. |
+| `get_domain_modules_slice` | Modules (and optionally consumers) for a domain tag, with tier. |
+| `get_context_detail` | Detailed context for a module/export/domain: drill_down, optional body/grepBody/includePrivate; annotation with quality score. |
 | `get_path_from_root` | Path from repo root to a given item (by id). |
-| `search_repo_context` | Search repo context by name/query (modules, exports, domains). |
-| `get_dependency_impact` | Upstream/downstream dependencies for a module or export. |
+| `search_repo_context` | Search by name/query — results grouped by type (domains, modules, services, capabilities); optional `nodeTypes` filter. |
+
+### Dependency Analysis
+
+| Tool | Purpose |
+|------|--------|
+| `get_dependency_impact` | Upstream/downstream dependencies with `uses[]` and optional `exportName` filter. |
+| `get_cross_package_dependencies` | Inter-package import edges with symbol details and boundary violation detection. |
+| `get_runtime_topology` | Lambda triggers (API/SQS/Schedule), resource usage, data flows between services. |
+
+### Code Structure
+
+| Tool | Purpose |
+|------|--------|
 | `get_env_vars_usage` | Env var usage across packages. |
 | `get_routes_map` | Routes and conditional renders (frontend/Lambda). |
 | `get_interface_implementations` | Classes implementing a given interface. |
 | `get_export_callees` | Direct callees inside an exported function/class. |
-| `get_modules_annotation_queue` | Prioritized list of modules to annotate (optional domain filter). |
-| `write_module_annotation` | Write or merge a semantic annotation for a module. |
-| `get_annotation_coverage_stats` | Annotation coverage (total, fresh, stale, by domain). |
-| `refresh_repo_context` | Re-run snapshot + graph build (e.g. after code change). |
+
+### Annotations
+
+| Tool | Purpose |
+|------|--------|
+| `get_modules_annotation_queue` | Prioritized queue with quality-based ranking and `recommendedFields`. |
+| `write_module_annotation` | Write or merge a semantic annotation for a node. |
+| `get_annotation_coverage_stats` | Coverage stats: total/fresh/stale, by domain, by tier. |
+| `get_orphaned_annotations` | Detect annotations whose node no longer exists in the graph. |
+| `cleanup_orphaned_annotations` | Preview or remove orphaned annotations (with auto-backup). |
+
+### Maintenance
+
+| Tool | Purpose |
+|------|--------|
+| `refresh_repo_context` | Re-run snapshot + graph build; reports orphaned annotations. |
 
 ---
 

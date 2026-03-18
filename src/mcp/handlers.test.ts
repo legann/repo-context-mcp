@@ -224,13 +224,14 @@ describe('search_repo_context', () => {
     }
 
     const result = toolHandlers['search_repo_context'](ctx, { query: 'alpha' }) as Record<string, unknown>;
-    const results = result.results as Array<{ id: string }>;
-    expect(results.some(r => r.id === 'mod:test/alpha')).toBe(true);
+    const grouped = result.results as Record<string, Array<{ id: string }>>;
+    const allResults = Object.values(grouped).flat();
+    expect(allResults.some(r => r.id === 'mod:test/alpha')).toBe(true);
   });
 
   it('returns empty results for unmatched query', () => {
     const ctx = makeCtx();
     const result = toolHandlers['search_repo_context'](ctx, { query: 'zzzznotfound' }) as Record<string, unknown>;
-    expect((result.results as unknown[]).length).toBe(0);
+    expect(result.totalResults).toBe(0);
   });
 });

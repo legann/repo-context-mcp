@@ -9,7 +9,7 @@ import type {
   SemanticAnnotation, ModuleInfo, StoredAnnotation,
 } from '../types.js';
 import { CURRENT_ANNOTATION_SCHEMA_VERSION } from '../types.js';
-import { type AnnotationStore, SemanticAnnotationSchema } from '../annotations/store.js';
+import { type AnnotationStore, SemanticAnnotationSchema, computeAnnotationQuality } from '../annotations/store.js';
 import { buildNodeView, pathFromRoot, getImpact } from '../graph/index.js';
 import { graphStats } from '../graph/index.js';
 import type { DomainsConfig } from '../stage2/domains.js';
@@ -227,7 +227,17 @@ async function handleGetContextDetail(ctx: ToolContext, args: Record<string, unk
       fresh = true;
     }
     view.semantic = ann.semantic;
-    view.semanticMeta = { pass: ann.pass, updatedAt: ann.updatedAt, fresh };
+    const meta: Record<string, unknown> = { pass: ann.pass, updatedAt: ann.updatedAt, fresh };
+    if (mod) {
+      const maxLine = mod.exports.reduce((m, e) => Math.max(m, e.lineRange.end), 0);
+      const quality = computeAnnotationQuality(ann.semantic, {
+        exportCount: mod.exports.length,
+        lineCount: maxLine,
+        envVars: mod.contentHints?.envVars,
+      });
+      meta.quality = quality;
+    }
+    view.semanticMeta = meta as NodeViewDetail['semanticMeta'];
   }
   return view;
 }
@@ -268,12 +278,23 @@ function handleGetContext(ctx: ToolContext, args: Record<string, unknown>): unkn
     const modules = taggedModuleIds
       .map(id => buildNodeView(graph, id))
       .filter((n): n is NodeView => n !== null);
+    const tier = domainNode.type === 'domain' ? domainNode.data?.tier : undefined;
+    const subdomainIds = domainNode.type === 'domain' ? domainNode.data?.subdomains : undefined;
     const result: Record<string, unknown> = {
       domain: domainId,
       label: domainNode.label,
+      ...(tier ? { tier } : {}),
       moduleCount: modules.length,
       modules: modules.map(m => ({ id: m.id, label: m.label, exports: m.drill_down.length, links: m.links?.length ?? 0 })),
     };
+    if (subdomainIds?.length) {
+      result.subdomains = subdomainIds.map(sid => {
+        const sNode = graph.nodes.get(sid);
+        const sIncoming = graph.inEdges.get(sid) ?? [];
+        const sModCount = sIncoming.filter(e => e.kind === 'tagged' && graph.nodes.get(e.from)?.type === 'module').length;
+        return { id: sid, label: sNode?.label ?? sid, moduleCount: sModCount };
+      });
+    }
     const domainAnn = annotations.get(domainId);
     if (domainAnn) {
       result.semantic = domainAnn.semantic;
@@ -298,7 +319,7 @@ function handleFindInRepo(ctx: ToolContext, args: Record<string, unknown>): unkn
   const normalized = rawQuery.replace(/\.(tsx?|jsx?)$/, '').replace(/\/index$/, '');
   const tokens = SEARCH_TOKENIZE(normalized);
   const max = (args.maxResults as number) ?? 10;
-  const matches: Array<{ id: string; label: string; type: string; score: number }> = [];
+  const nodeTypes = args.nodeTypes as string[] | undefined;
 
   let candidateIds: Set<string>;
   if (tokens.length === 0) {
@@ -314,9 +335,11 @@ function handleFindInRepo(ctx: ToolContext, args: Record<string, unknown>): unkn
     }
   }
 
+  const allMatches: Array<{ id: string; label: string; type: string; score: number }> = [];
   for (const nodeId of candidateIds) {
     const node = graph.nodes.get(nodeId);
     if (!node) continue;
+    if (nodeTypes?.length && !nodeTypes.includes(node.type)) continue;
     const idL = node.id.toLowerCase();
     const labelL = node.label.toLowerCase();
     const searchableData = node.type === 'capability' && node.data
@@ -329,15 +352,47 @@ function handleFindInRepo(ctx: ToolContext, args: Record<string, unknown>): unkn
       if (searchableData && searchableData.includes(t)) score += 2;
       if (node.type === t) score += 1;
     }
-    if (score > 0) matches.push({ id: node.id, label: node.label, type: node.type, score });
+    if (score > 0) allMatches.push({ id: node.id, label: node.label, type: node.type, score });
   }
-  matches.sort((a, b) => b.score - a.score);
+  allMatches.sort((a, b) => b.score - a.score);
+
+  const enrichMatch = (m: typeof allMatches[number]) => {
+    const nodeView = buildNodeView(graph, m.id);
+    return { ...m, children: nodeView?.drill_down.length ?? 0, links: nodeView?.links?.length ?? 0 };
+  };
+
+  if (nodeTypes?.length) {
+    return {
+      query: normalized || rawQuery,
+      results: allMatches.slice(0, max).map(enrichMatch),
+      totalResults: allMatches.length,
+    };
+  }
+
+  const groups: Record<string, typeof allMatches> = { domains: [], modules: [], services: [], capabilities: [] };
+  for (const m of allMatches) {
+    switch (m.type) {
+      case 'domain': groups.domains.push(m); break;
+      case 'module': groups.modules.push(m); break;
+      case 'service': groups.services.push(m); break;
+      case 'capability': groups.capabilities.push(m); break;
+    }
+  }
+
+  const maxPerGroup = Math.max(3, Math.floor(max / 4));
+  const grouped: Record<string, unknown[]> = {};
+  let totalResults = 0;
+  for (const [key, items] of Object.entries(groups)) {
+    if (items.length > 0) {
+      grouped[key] = items.slice(0, maxPerGroup).map(enrichMatch);
+      totalResults += items.length;
+    }
+  }
+
   return {
     query: normalized || rawQuery,
-    results: matches.slice(0, max).map(m => {
-      const nodeView = buildNodeView(graph, m.id);
-      return { ...m, children: nodeView?.drill_down.length ?? 0, links: nodeView?.links?.length ?? 0 };
-    }),
+    results: grouped,
+    totalResults,
   };
 }
 
@@ -421,8 +476,11 @@ function handleGetFeatureContext(ctx: ToolContext, args: Record<string, unknown>
       [...byPkg.entries()].map(([pkg, mods]) => [pkg, mods.map(id => ({ id, label: nodeLabel(id) }))])
     );
   };
+  const domainNode = graph.nodes.get(domainId);
+  const tier = domainNode?.type === 'domain' ? domainNode.data?.tier : undefined;
   const result: Record<string, unknown> = {
     domain: tag,
+    ...(tier ? { tier } : {}),
     taggedModules: taggedModuleIds.size,
     totalWithDeps: allIds.size,
     byPackage: groupByPackage(allIds),
@@ -553,6 +611,244 @@ function handleGetCallContext(ctx: ToolContext, args: Record<string, unknown>): 
 
 const EXCLUDED_PACKAGE_DOMAIN = 'repo-context';
 
+function handleGetRuntimeTopology(ctx: ToolContext, args: Record<string, unknown>): unknown {
+  const { graph } = ctx.getState();
+  const scope = (args.scope as string) ?? 'all';
+  const includeResources = args.includeResources !== false;
+  const includeApiRoutes = args.includeApiRoutes !== false;
+
+  const serviceSet = graph.byType.get('service');
+  const serviceIds = serviceSet ? Array.from(serviceSet) : [];
+
+  const scopeDomainId = scope !== 'all' && !scope.startsWith('pkg:')
+    ? (scope.startsWith('domain:') ? scope : `domain:${scope}`)
+    : null;
+  const scopePkg = scope.startsWith('pkg:') ? scope : null;
+
+  const isInScope = (svcId: string): boolean => {
+    if (scope === 'all') return true;
+    if (scopeDomainId) {
+      const outEdges = graph.outEdges.get(svcId) ?? [];
+      return outEdges.some(e => e.kind === 'tagged' && e.to === scopeDomainId);
+    }
+    if (scopePkg) {
+      const outEdges = graph.outEdges.get(svcId) ?? [];
+      const infraTargets = outEdges.filter(e => e.kind === 'infra').map(e => e.to);
+      for (const modId of infraTargets) {
+        const inEdges = graph.inEdges.get(modId) ?? [];
+        if (inEdges.some(e => e.kind === 'contains' && e.from === scopePkg)) return true;
+      }
+    }
+    return false;
+  };
+
+  const services: unknown[] = [];
+  const resourceMap = new Map<string, { id: string; type: string; consumers: string[]; producers: string[] }>();
+  const dataFlows: unknown[] = [];
+
+  for (const svcId of serviceIds) {
+    if (!isInScope(svcId)) continue;
+    const node = graph.nodes.get(svcId);
+    if (!node || node.type !== 'service') continue;
+
+    const svcData = node.data;
+    const outEdges = graph.outEdges.get(svcId) ?? [];
+    const inEdges = graph.inEdges.get(svcId) ?? [];
+
+    const domains = outEdges
+      .filter(e => e.kind === 'tagged')
+      .map(e => graph.nodes.get(e.to)?.label)
+      .filter((d): d is string => d != null);
+
+    const infraMods = outEdges.filter(e => e.kind === 'infra').map(e => e.to);
+    const handler = infraMods.length > 0 ? graph.nodes.get(infraMods[0])?.label : svcData?.handler;
+
+    const triggers: unknown[] = [];
+    if (svcData?.triggers) {
+      for (const t of svcData.triggers) {
+        if (!includeApiRoutes && t.type === 'api') continue;
+        triggers.push(t);
+      }
+    }
+
+    const resources: unknown[] = [];
+    if (svcData?.envRefs) {
+      for (const ref of svcData.envRefs) {
+        if (ref.targetLogicalId) {
+          const targetNode = [...(graph.byType.get('service') ?? [])].find(id => graph.nodes.get(id)?.label === ref.targetLogicalId);
+          if (targetNode) {
+            const targetGraphNode = graph.nodes.get(targetNode);
+            resources.push({
+              id: targetNode,
+              logicalId: ref.targetLogicalId,
+              access: 'read-write',
+              envVar: ref.varName,
+            });
+            if (!resourceMap.has(targetNode)) {
+              resourceMap.set(targetNode, {
+                id: targetNode,
+                type: targetGraphNode?.description ?? 'unknown',
+                consumers: [],
+                producers: [],
+              });
+            }
+            resourceMap.get(targetNode)!.consumers.push(node.label);
+          }
+        }
+      }
+    }
+
+    const publishes: unknown[] = [];
+    const consumedBy = inEdges.filter(e => e.kind === 'consumes');
+    for (const edge of consumedBy) {
+      const producerNode = graph.nodes.get(edge.from);
+      if (producerNode) {
+        if (!resourceMap.has(edge.from)) {
+          resourceMap.set(edge.from, { id: edge.from, type: producerNode.description, consumers: [], producers: [] });
+        }
+        resourceMap.get(edge.from)!.consumers.push(node.label);
+      }
+    }
+
+    const producesTo = outEdges.filter(e => e.kind === 'consumes');
+    for (const edge of producesTo) {
+      const queueNode = graph.nodes.get(edge.to);
+      if (queueNode) {
+        publishes.push({ type: 'sqs', target: edge.to });
+      }
+    }
+
+    services.push({
+      id: svcId,
+      label: node.label,
+      handler,
+      domains,
+      triggers: triggers.length > 0 ? triggers : undefined,
+      resources: resources.length > 0 ? resources : undefined,
+      publishes: publishes.length > 0 ? publishes : undefined,
+    });
+  }
+
+  for (const [queueId, entry] of resourceMap) {
+    if (entry.producers.length > 0 && entry.consumers.length > 0) {
+      for (const from of entry.producers) {
+        for (const to of entry.consumers) {
+          if (from !== to) {
+            dataFlows.push({ from, through: queueId, to });
+          }
+        }
+      }
+    }
+  }
+
+  const result: Record<string, unknown> = { scope, services };
+  if (includeResources && resourceMap.size > 0) {
+    result.resources = [...resourceMap.values()];
+  }
+  if (dataFlows.length > 0) {
+    result.dataFlows = dataFlows;
+  }
+  return result;
+}
+
+function handleGetCrossPackageDependencies(ctx: ToolContext, args: Record<string, unknown>): unknown {
+  const { graph, modulesById } = ctx.getState();
+  const filterPkg = args.packageId as string | undefined;
+  const direction = (args.direction as string) ?? 'both';
+  const topN = (args.topN as number) ?? 5;
+
+  const pkgOfModule = (modId: string): string | undefined => {
+    const edges = graph.inEdges.get(modId) ?? [];
+    const pkgEdge = edges.find(e => e.kind === 'contains' && e.from.startsWith('pkg:'));
+    return pkgEdge?.from;
+  };
+
+  const edgeAgg = new Map<string, { from: string; to: string; moduleEdges: Array<{ fromModule: string; toModule: string; symbols: string[] }> }>();
+
+  for (const edge of graph.edges) {
+    if (edge.kind !== 'imports') continue;
+    const fromNode = graph.nodes.get(edge.from);
+    const toNode = graph.nodes.get(edge.to);
+    if (!fromNode || fromNode.type !== 'module' || !toNode || toNode.type !== 'module') continue;
+
+    const fromPkg = pkgOfModule(edge.from);
+    const toPkg = pkgOfModule(edge.to);
+    if (!fromPkg || !toPkg || fromPkg === toPkg) continue;
+
+    if (filterPkg) {
+      if (direction === 'imports' && fromPkg !== filterPkg) continue;
+      if (direction === 'exports' && toPkg !== filterPkg) continue;
+      if (direction === 'both' && fromPkg !== filterPkg && toPkg !== filterPkg) continue;
+    }
+
+    const key = `${fromPkg}→${toPkg}`;
+    let entry = edgeAgg.get(key);
+    if (!entry) {
+      entry = { from: fromPkg, to: toPkg, moduleEdges: [] };
+      edgeAgg.set(key, entry);
+    }
+
+    const mod = modulesById.get(edge.from);
+    const symbols = mod?.imports
+      .filter(i => i.resolvedModuleId === edge.to)
+      .flatMap(i => i.importedNames) ?? [];
+
+    entry.moduleEdges.push({
+      fromModule: fromNode.label,
+      toModule: toNode.label,
+      symbols,
+    });
+  }
+
+  const packages = new Set<string>();
+  const edges: unknown[] = [];
+
+  for (const entry of edgeAgg.values()) {
+    packages.add(entry.from);
+    packages.add(entry.to);
+    entry.moduleEdges.sort((a, b) => b.symbols.length - a.symbols.length);
+    edges.push({
+      from: entry.from,
+      to: entry.to,
+      moduleEdges: entry.moduleEdges.length,
+      direction: 'imports',
+      topModuleEdges: entry.moduleEdges.slice(0, topN).map(me => ({
+        fromModule: me.fromModule,
+        toModule: me.toModule,
+        symbols: me.symbols,
+      })),
+    });
+  }
+
+  (edges as Array<{ moduleEdges: number }>).sort((a, b) => b.moduleEdges - a.moduleEdges);
+
+  const boundaryViolations: unknown[] = [];
+  for (const entry of edgeAgg.values()) {
+    for (const me of entry.moduleEdges) {
+      const toModLabel = me.toModule;
+      if (!toModLabel.endsWith('/index') && !toModLabel.endsWith('…/index')) {
+        const indexLabel = toModLabel.replace(/\/[^/]+$/, '/index');
+        const hasIndex = [...graph.nodes.values()].some(
+          n => n.type === 'module' && n.label === indexLabel,
+        );
+        if (hasIndex) {
+          boundaryViolations.push({
+            from: me.fromModule,
+            to: me.toModule,
+            note: `Direct import bypasses ${entry.to} public API`,
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    packages: [...packages].sort(),
+    edges,
+    ...(boundaryViolations.length > 0 ? { boundaryViolations: boundaryViolations.slice(0, 20) } : {}),
+  };
+}
+
 function handleGetAnnotationQueue(ctx: ToolContext, args: Record<string, unknown>): unknown {
   const { graph, snapshot, annotations, domainsConfig } = ctx.getState();
   let domain = args.domain as string | undefined;
@@ -652,17 +948,97 @@ function handleGetAnnotationsStats(ctx: ToolContext, _args: Record<string, unkno
   return annotations.getStats(graph, snapshot);
 }
 
+function handleCleanupOrphanedAnnotations(ctx: ToolContext, args: Record<string, unknown>): unknown {
+  const { graph, annotations } = ctx.getState();
+  const mode = args.mode as string;
+  const nodeType = (args.nodeType as string) ?? 'all';
+
+  const report = annotations.detectOrphaned(graph);
+  const orphaned = nodeType === 'all'
+    ? report.orphaned
+    : report.orphaned.filter(o => o.nodeType === nodeType);
+
+  if (mode === 'preview') {
+    return {
+      mode: 'preview',
+      wouldRemove: orphaned.length,
+      wouldRemoveByType: countByType(orphaned),
+      entries: orphaned.slice(0, 50).map(o => ({
+        nodeId: o.nodeId,
+        pass: o.pass,
+        summary: o.summaryPreview,
+      })),
+    };
+  }
+
+  if (mode === 'remove') {
+    const idsToRemove = orphaned.map(o => o.nodeId);
+    annotations.flush();
+    const removed = annotations.delete(idsToRemove);
+    annotations.flush();
+    return {
+      mode: 'remove',
+      removed,
+      removedByType: countByType(orphaned),
+    };
+  }
+
+  return { error: `Unknown mode: ${mode}` };
+}
+
+function countByType(items: Array<{ nodeType: string }>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const i of items) {
+    counts[i.nodeType] = (counts[i.nodeType] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function handleGetOrphanedAnnotations(ctx: ToolContext, args: Record<string, unknown>): unknown {
+  const { graph, annotations } = ctx.getState();
+  const nodeType = (args.nodeType as string) ?? 'all';
+  const report = annotations.detectOrphaned(graph);
+
+  if (nodeType !== 'all') {
+    const filtered = report.orphaned.filter(o => o.nodeType === nodeType);
+    return {
+      total: filtered.length,
+      orphaned: filtered,
+      byType: { [nodeType]: filtered.length },
+    };
+  }
+
+  return report;
+}
+
 function handleRefreshContext(ctx: ToolContext, _args: Record<string, unknown>): unknown {
   const before = graphStats(ctx.getState().graph);
   ctx.refreshContext();
   const afterState = ctx.getState();
   const after = graphStats(afterState.graph);
-  return {
+
+  const orphanedReport = afterState.annotations.detectOrphaned(afterState.graph);
+  const annotationsData = afterState.annotations.getAll();
+  const totalAnnotations = Object.keys(annotationsData).length;
+
+  const result: Record<string, unknown> = {
     status: 'rebuilt',
     builtAt: afterState.builtAt,
     before: { nodes: before.totalNodes, edges: before.totalEdges },
     after: { nodes: after.totalNodes, edges: after.totalEdges },
+    annotations: {
+      total: totalAnnotations,
+      orphaned: orphanedReport.total,
+      ...(orphanedReport.total > 0 ? { orphanedByType: orphanedReport.byType } : {}),
+    },
   };
+
+  if (orphanedReport.total > 0) {
+    (result.annotations as Record<string, unknown>).warning =
+      `${orphanedReport.total} annotations reference nodes that no longer exist. Run get_orphaned_annotations for details, cleanup_orphaned_annotations to resolve.`;
+  }
+
+  return result;
 }
 
 export const toolHandlers: Record<string, ToolHandler> = {
@@ -676,8 +1052,12 @@ export const toolHandlers: Record<string, ToolHandler> = {
   get_routes_map: handleGetRouteMap,
   get_interface_implementations: handleGetImplementations,
   get_export_callees: handleGetCallContext,
+  get_cross_package_dependencies: handleGetCrossPackageDependencies,
+  get_runtime_topology: handleGetRuntimeTopology,
   get_modules_annotation_queue: handleGetAnnotationQueue,
   write_module_annotation: handleAnnotateModule,
   get_annotation_coverage_stats: handleGetAnnotationsStats,
+  get_orphaned_annotations: handleGetOrphanedAnnotations,
+  cleanup_orphaned_annotations: handleCleanupOrphanedAnnotations,
   refresh_repo_context: handleRefreshContext,
 };

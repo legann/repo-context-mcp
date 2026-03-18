@@ -69,6 +69,18 @@ Full step-by-step: **Workflow** below.
 - **`get_context_detail(..., grepBody: "regex")`** — when you search **inside one known module**. Returns matching lines with context; no need to read the whole file.
 - **Grep** — when you search a **string/pattern across the whole repo** and you do **not** yet know which module it lives in. Once you know the module, prefer `get_context_detail` + `grepBody` for that file.
 
+**Pattern: how to explore a feature or integration by name (recommended):**
+
+1. Use `search_repo_context` to find relevant domains and modules by keyword:
+   - `CallMcpTool(server: "<id>", toolName: "search_repo_context", arguments: { "query": "feature-name" })`
+2. Pick a **domain id** from the `domains` group (e.g. `domain:feature-x`) and call:
+   - `get_domain_or_focus_context({ "domainOrNodeId": "feature-x" })` for a summary
+   - `get_domain_modules_slice({ "domainTag": "feature-x", "includeConsumers": true })` for the full slice with consumers and dependencies
+3. For any interesting module from these results, call:
+   - `get_context_detail({ "nodeId": "mod:pkg/.../module", "includeBody": false })` to see exports, links, and semantic annotation before reading code
+
+This pattern works the same for platform integrations (e.g. `"monday"`, `"notion"`) and any other feature name: search → pick domain/module → slice → detail.
+
 Avoid duplicating: if you already have the module id from `get_domain_modules_slice` or `search_repo_context`, use `get_context_detail` + `grepBody` instead of Grep on that path.
 
 ## File size rules
@@ -90,17 +102,24 @@ Avoid duplicating: if you already have the module id from `get_domain_modules_sl
 ## Available tools
 
 ### `get_domain_or_focus_context` — start here
-Get architectural context by domain or focus (id):
+Get architectural context by domain or focus (id). For domains, response includes **`tier`** (`business` | `feature` | `layer` | `technical`) and **`subdomains`** (auto-generated for large business/feature domains with 10+ modules):
 ```
 CallMcpTool(server: "<id>", toolName: "get_domain_or_focus_context", arguments: { "domainOrNodeId": "example-domain" })
-CallMcpTool(server: "<id>", toolName: "get_domain_or_focus_context", arguments: { "domainOrNodeId": "another-domain" })
+→ { domain: "domain:auth", label: "auth", tier: "business", moduleCount: 55,
+    subdomains: [{ id: "domain:auth/oauth-adapters", label: "auth/oauth-adapters", moduleCount: 5 }, ...],
+    modules: [...] }
 ```
 
 ### `search_repo_context` — search by name or query
-Search repo context by name, id, or type. **Multi-word queries** are split into tokens; an item matches if each token appears somewhere in its id, label, or (for capabilities) signature/typeValue/implementsInterfaces. Use this to find types and adapters by concept:
+Search repo context by name, id, or type. **Multi-word queries** are split into tokens; an item matches if each token appears somewhere in its id, label, or (for capabilities) signature/typeValue/implementsInterfaces.
+
+**Grouped results (default):** Without `nodeTypes`, results are grouped by type: `{ results: { domains: [...], modules: [...], services: [...], capabilities: [...] }, totalResults }`. Each group is capped at `maxResults/4` (min 3).
+
+**Flat results (filtered):** With `nodeTypes: ["module", "domain"]`, returns flat list of only those types: `{ results: [...], totalResults }`.
+
 ```
 CallMcpTool(server: "<id>", toolName: "search_repo_context", arguments: { "query": "module-name" })
-CallMcpTool(server: "<id>", toolName: "search_repo_context", arguments: { "query": "ExportName" })
+CallMcpTool(server: "<id>", toolName: "search_repo_context", arguments: { "query": "ExportName", "nodeTypes": ["capability"] })
 ```
 `/index` is not required; it is normalized automatically.
 
@@ -185,6 +204,13 @@ Use for large function exports (200+ lines) to see internal structure without re
 
 **ID normalization:** `/index` and extensions (`.ts`, `.tsx`) are stripped automatically.
 `get_context_detail({ nodeId: "mod:.../barrel/index" })` and `get_context_detail({ nodeId: "mod:.../barrel" })` — same thing.
+
+**Annotation quality** — `semanticMeta` now includes `quality` for annotated modules:
+```
+→ { semantic: {...}, semanticMeta: { pass: 3, updatedAt: "...", fresh: true,
+    quality: { score: 7.5, tier: "detailed", missingFields: ["risks", "dataFlow"] } } }
+```
+Quality `score` 0-10, `tier`: `minimal` (<2) / `basic` (<5) / `detailed` (<8) / `comprehensive` (8+). `missingFields` shows what to add.
 
 **`envVars`/`hasRoutes`** — for modules with env vars or route definitions:
 ```
@@ -272,15 +298,42 @@ CallMcpTool(server: "<id>", toolName: "get_export_callees", arguments: { "nodeId
 ```
 Only for exports ≤ 500 lines. Filters stdlib (console, JSON, Math, etc).
 
+### `get_cross_package_dependencies` — inter-package imports
+Show dependency edges between packages with import counts and key symbols:
+```
+CallMcpTool(server: "<id>", toolName: "get_cross_package_dependencies", arguments: {})
+CallMcpTool(server: "<id>", toolName: "get_cross_package_dependencies", arguments: { "packageId": "pkg:@dexrx/lambda-functions", "direction": "imports" })
+→ { packages: ["pkg:A", "pkg:B"], edges: [
+    { from: "pkg:A", to: "pkg:B", moduleEdges: 47, direction: "imports",
+      topModuleEdges: [{ fromModule: "...", toModule: "...", symbols: ["authMiddleware", "checkAuth"] }] }
+  ], boundaryViolations: [{ from: "...", to: "...", note: "Direct import bypasses public API" }] }
+```
+Use for understanding cross-package coupling, finding boundary violations, and planning refactors. `direction`: `"imports"` = what package imports, `"exports"` = what others import from package, `"both"` (default).
+
+### `get_runtime_topology` — Lambda triggers, resources, data flows
+Show runtime topology: how services are triggered, what resources they use, data flow through queues:
+```
+CallMcpTool(server: "<id>", toolName: "get_runtime_topology", arguments: {})
+CallMcpTool(server: "<id>", toolName: "get_runtime_topology", arguments: { "scope": "auth" })
+→ { scope: "all", services: [
+    { id: "service:aws-lambda:FormulaManagerFunction", label: "FormulaManagerFunction",
+      triggers: [{ type: "api", method: "GET", path: "/formula" }, { type: "sqs", queueRef: "ComputeQueue" }],
+      resources: [{ id: "service:aws-dynamodb:FormulasTable", access: "read-write" }] }
+  ], resources: [...], dataFlows: [{ from: "FuncA", through: "resource:sqs:Queue", to: "FuncB" }] }
+```
+`scope`: `"all"` (default), domain name, or package id. SAM parser extracts Events (Api/SQS/Schedule triggers) and Environment.Variables references (!Ref/!GetAtt → resource links).
+
 ### `get_modules_annotation_queue` — queue for semantic annotation
 Get list of modules that need annotation (unannotated or **stale**):
 - **stale** = file content changed (contentHash) **or** annotation is outdated by schema version.
 - When new fields are added to the annotation contract, schema version is bumped; old annotations without the new version enter the queue with reason `"Schema outdated (v1 < v2), needs backfill"` — they need to be updated (backfill).
 ```
 CallMcpTool(server: "<id>", toolName: "get_modules_annotation_queue", arguments: { "domain": "example-domain", "limit": 10 })
-→ { items: [{ nodeId: "mod:...", status: "unannotated"|"stale", priority: 26, reason: "...", context: { topExports: [...] } }] }
+→ { items: [{ nodeId: "mod:...", status: "unannotated"|"stale", priority: 26, reason: "...",
+    context: { topExports: [...], downstreamCount, totalLines },
+    recommendedFields: ["dataFlow", "risks", "envDependencies"] }] }
 ```
-Used by the annotator agent. Full instructions — section **«Semantic annotation»** below in this file.
+Priority formula: `(downstream × 2) + exports + (lines/200) - (qualityScore × 3)`. Items with high downstream impact and low annotation quality are prioritized. `recommendedFields` tells which annotation fields are missing for this module type. Used by the annotator agent. Full instructions — section **«Semantic annotation»** below in this file.
 
 ### `write_module_annotation` — write a semantic annotation
 Write an AI-generated annotation for a **module, capability, domain, infra module, or service**. **Merge on update:** if the item already has an annotation, the provided `semantic` object is **merged** with the existing one (`{ ...existing.semantic, ...incoming }`). You can send only new/changed fields (e.g. on backfill after schema extension). Node ids: `mod:...`, `cap:...`, `domain:...`, `infra:aws-sam:...`, `infra:helm:...`, `service:aws-lambda:...`, etc.
@@ -317,19 +370,44 @@ Domain annotations are surfaced in `get_domain_or_focus_context` and `get_domain
 Response may include `merged: true` and `schemaVersion: N`. Annotations are persisted (`repo-context/artifacts/annotations.json`) and served automatically via `get_context_detail`, `get_domain_or_focus_context`, and `get_domain_modules_slice`. Optional extension fields: `integrationPoints`, `stateShape`, `dataFlow`, `envDependencies` (see «Semantic annotation» section below).
 
 ### `get_annotation_coverage_stats` — annotation coverage
-Stats: how many modules are annotated, **fresh** (content unchanged and schemaVersion current), **stale** (re-annotation or backfill needed), breakdown by domain:
+Stats: how many modules are annotated, **fresh** (content unchanged and schemaVersion current), **stale** (re-annotation or backfill needed), breakdown by domain and **by tier**:
 ```
 CallMcpTool(server: "<id>", toolName: "get_annotation_coverage_stats", arguments: {})
-→ { totalModules: N, annotated: M, fresh: K, stale: M-K, infraModules: { total, annotated, fresh }, services: { total, annotated, fresh }, byDomain: { ... } }
+→ { totalModules: N, annotated: M, fresh: K, stale: M-K,
+    infraModules: { total, annotated, fresh }, services: { total, annotated, fresh },
+    byDomain: { ... },
+    byTier: { business: { domains: ["auth", ...], totalModules: 280 }, feature: {...}, layer: {...}, technical: {...} },
+    domainAnnotations: { totalDomains, annotated, list } }
 ```
 After extending the annotation schema, all old records are considered stale until the annotator is run again (backfill).
-Stats include `domainAnnotations: { totalDomains, annotated, list }` showing coverage of domain-level annotations.
+
+### `get_orphaned_annotations` — detect dead annotations
+Find annotations whose node no longer exists in the graph (e.g. after STRUCTURAL_DIRS changes removed domains):
+```
+CallMcpTool(server: "<id>", toolName: "get_orphaned_annotations", arguments: {})
+CallMcpTool(server: "<id>", toolName: "get_orphaned_annotations", arguments: { "nodeType": "domain" })
+→ { total: 203, orphaned: [{ nodeId, nodeType, pass, summaryPreview, reason }], byType: { domain: 198, module: 3 } }
+```
+
+### `cleanup_orphaned_annotations` — remove dead annotations
+Preview or remove orphaned annotations (creates auto-backup before deletion):
+```
+CallMcpTool(server: "<id>", toolName: "cleanup_orphaned_annotations", arguments: { "mode": "preview" })
+→ { mode: "preview", wouldRemove: 203, wouldRemoveByType: { domain: 198, ... }, entries: [...] }
+
+CallMcpTool(server: "<id>", toolName: "cleanup_orphaned_annotations", arguments: { "mode": "remove" })
+→ { mode: "remove", removed: 203, removedByType: { domain: 198, ... } }
+```
 
 ### `refresh_repo_context` — rebuild the graph
-If code changed and you need a fresh graph:
+If code changed and you need a fresh graph. Now includes **orphaned annotations** detection:
 ```
 CallMcpTool(server: "<id>", toolName: "refresh_repo_context", arguments: {})
+→ { status: "rebuilt", before: {...}, after: {...},
+    annotations: { total: 925, orphaned: 203, orphanedByType: { domain: 198 },
+      warning: "203 annotations reference nodes that no longer exist..." } }
 ```
+If `orphaned > 0`, run `get_orphaned_annotations` for details and `cleanup_orphaned_annotations` to resolve.
 
 ## Node types (id → type)
 - `root` — repo root
@@ -338,19 +416,23 @@ CallMcpTool(server: "<id>", toolName: "refresh_repo_context", arguments: {})
 - `infra:kind:path` — infra module (IaC file: e.g. `infra:aws-sam:infrastructure/sam/template.yaml`, `infra:helm:.../Chart.yaml`)
 - `cap:pkg/path/export` — capability (export with signature and line range)
 - `service:provider:name` — service (infra resource: e.g. `service:aws-lambda:MyFunc`, `service:k8s-deployment:my-app`)
-- `domain:name` — domain (path segments, clusters, config; infra: `infra-sam`, `infra-k8s`, `infra-helm`, `infra-dockerfile`)
+- `domain:name` — domain with **tier** (`business`/`feature`/`layer`/`technical`). Large business/feature domains have auto-generated **subdomains** (`domain:auth/oauth-adapters`). Infra domains: `infra-sam`, `infra-k8s`, `infra-helm`, `infra-dockerfile`.
 
 ### Where domains come from (no project-specific hardcoding)
-1. **Path-based** — first non-structural path segment (`src/auth/...` → `auth`; skip `src`, `shared`, `utils`, etc.).
+1. **Path-based** — first non-structural path segment (`src/auth/...` → `auth`; skip `src`, `shared`, `utils`, `types`, `config`, `store`, `tests`, `adapters`, `interfaces`, `entities`, `repositories`, `use-cases`, etc.).
 2. **Import clusters** — label propagation on the import graph; cluster name = most frequent path segment in the cluster.
 3. **Infra** — infra modules and services are tagged by kind: SAM/CFN → `infra-sam`, Kubernetes/k3d → `infra-k8s`, Helm → `infra-helm`, Dockerfile → `infra-dockerfile`.
 4. **Optional config** — extra domains from regex on paths; **domainAliases** for query resolution. Files: `repo-context/domains.config.json` or `.repo-context-domains.json`. Format: `{ "domainAliases": { "infra-k8s": ["k8s", "kubernetes"] }, "patterns": [ { "pattern": "\\\\b(segment1|segment2)\\\\b", "domain": "domain-name" } ] }`. Aliases resolve to canonical when calling tools (e.g. `domainTag: "kubernetes"` → `infra-k8s`).
+5. **Tier classification** — each domain gets a tier: `business` (5+ modules, 2+ packages), `feature` (3+ modules), `layer` (types/utils/config/etc.), `technical` (everything else).
+6. **Subdomains** — business/feature domains with 10+ modules get auto-generated subdomains by path prefix clustering (e.g. `domain:auth/oauth-adapters`).
 
 ## Edge types
 - `contains` — hierarchy (root→pkg→mod→cap; root→infra module→service)
 - `imports` — module imports module
-- `tagged` — module or service is tagged with a domain
+- `tagged` — module or service is tagged with a domain; subdomain → parent domain
 - `infra` — Lambda service node → TS module that implements the handler (deploys)
+- `consumes` — SQS queue service → Lambda service triggered by that queue
+- `uses_env` — Lambda service → resource service referenced via environment variable (!Ref/!GetAtt)
 
 ## Workflow (same as Cheat sheet, in order)
 

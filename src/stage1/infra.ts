@@ -7,6 +7,8 @@ import type {
   InfraModuleInfo,
   InfraResource,
   InfraResourceKind,
+  InfraTrigger,
+  InfraEnvRef,
   PackageInfo,
 } from '../types.js';
 
@@ -57,6 +59,89 @@ const samResourceKindMap: Record<string, InfraResourceKind> = {
   'AWS::IAM::Role': 'role',
 };
 
+/**
+ * Extract a CloudFormation reference from a YAML value.
+ * Handles !Ref, !GetAtt, Fn::Ref, Fn::GetAtt, and !Sub with variable references.
+ */
+function extractRef(
+  value: unknown,
+  allResourceTypes: Map<string, string>,
+): Omit<InfraEnvRef, 'varName'> | null {
+  if (typeof value === 'string') {
+    if (allResourceTypes.has(value)) {
+      return { refType: 'ref', targetLogicalId: value };
+    }
+    return null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+
+  if ('Ref' in obj && typeof obj.Ref === 'string') {
+    return allResourceTypes.has(obj.Ref) ? { refType: 'ref', targetLogicalId: obj.Ref } : null;
+  }
+
+  if ('Fn::GetAtt' in obj) {
+    const getAtt = obj['Fn::GetAtt'];
+    if (Array.isArray(getAtt) && typeof getAtt[0] === 'string') {
+      return allResourceTypes.has(getAtt[0]) ? { refType: 'getatt', targetLogicalId: getAtt[0] } : null;
+    }
+    if (typeof getAtt === 'string') {
+      const [logId] = getAtt.split('.');
+      return allResourceTypes.has(logId) ? { refType: 'getatt', targetLogicalId: logId } : null;
+    }
+  }
+
+  if ('Fn::Sub' in obj) {
+    return { refType: 'sub' };
+  }
+
+  return null;
+}
+
+function parseSamEvent(
+  name: string,
+  type: string,
+  props: Record<string, unknown>,
+  allResourceTypes: Map<string, string>,
+): InfraTrigger | null {
+  const typeLower = type.toLowerCase();
+  if (typeLower === 'api') {
+    return {
+      name,
+      type: 'api',
+      method: props.Method ? String(props.Method) : undefined,
+      path: props.Path ? String(props.Path) : undefined,
+    };
+  }
+  if (typeLower === 'sqs') {
+    let queueRef: string | undefined;
+    const queue = props.Queue;
+    if (queue && typeof queue === 'object') {
+      const qObj = queue as Record<string, unknown>;
+      if ('Fn::GetAtt' in qObj) {
+        const getAtt = qObj['Fn::GetAtt'];
+        if (Array.isArray(getAtt) && typeof getAtt[0] === 'string') queueRef = getAtt[0];
+        else if (typeof getAtt === 'string') queueRef = getAtt.split('.')[0];
+      }
+    }
+    if (!queueRef && typeof queue === 'string' && allResourceTypes.has(queue)) {
+      queueRef = queue;
+    }
+    return { name, type: 'sqs', queueRef };
+  }
+  if (typeLower === 'schedule') {
+    return {
+      name,
+      type: 'schedule',
+      schedule: props.Schedule ? String(props.Schedule) : undefined,
+    };
+  }
+  if (typeLower === 'websocket') {
+    return { name, type: 'websocket' };
+  }
+  return null;
+}
+
 const samParser: IaCParser = {
   kind: 'aws-sam',
 
@@ -76,17 +161,7 @@ const samParser: IaCParser = {
     if (!doc || typeof doc !== 'object') return null;
     const root = doc as {
       Transform?: unknown;
-      Resources?: Record<
-        string,
-        {
-          Type?: string;
-          Properties?: {
-            Handler?: string;
-            FunctionName?: string;
-            Environment?: { Variables?: Record<string, unknown> };
-          };
-        }
-      >;
+      Resources?: Record<string, Record<string, unknown>>;
     };
 
     const contentHash = createHash('sha256')
@@ -95,28 +170,45 @@ const samParser: IaCParser = {
       .slice(0, 16);
 
     const resources: InfraResource[] = [];
+    const allResourceTypes = new Map<string, string>();
 
     if (root.Resources && typeof root.Resources === 'object') {
       for (const [logicalId, res] of Object.entries(root.Resources)) {
-        const type = res?.Type ?? 'other';
+        const type = (res?.Type as string) ?? 'other';
+        allResourceTypes.set(logicalId, type);
+      }
+
+      for (const [logicalId, res] of Object.entries(root.Resources)) {
+        const type = (res?.Type as string) ?? 'other';
         const kind: InfraResourceKind = samResourceKindMap[type] ?? 'other';
+        const props = (res?.Properties ?? {}) as Record<string, unknown>;
 
         const attributes: Record<string, string> = {};
-        if (res?.Properties) {
-          const props = res.Properties as {
-            Handler?: string;
-            FunctionName?: string;
-          };
-          if (props.FunctionName) attributes.functionName = String(props.FunctionName);
-          if (props.Handler) attributes.handler = String(props.Handler);
-        }
+        if (props.FunctionName) attributes.functionName = String(props.FunctionName);
+        if (props.Handler) attributes.handler = String(props.Handler);
 
         const envVars: string[] = [];
-        const env = (res?.Properties as { Environment?: { Variables?: Record<string, unknown> } } | undefined)
-          ?.Environment?.Variables;
+        const envRefs: InfraEnvRef[] = [];
+        const env = (props.Environment as Record<string, unknown> | undefined)
+          ?.Variables as Record<string, unknown> | undefined;
         if (env && typeof env === 'object') {
-          for (const key of Object.keys(env)) {
+          for (const [key, val] of Object.entries(env)) {
             envVars.push(key);
+            const ref = extractRef(val, allResourceTypes);
+            if (ref) {
+              envRefs.push({ varName: key, ...ref });
+            }
+          }
+        }
+
+        const triggers: InfraTrigger[] = [];
+        const events = props.Events as Record<string, Record<string, unknown>> | undefined;
+        if (events && typeof events === 'object') {
+          for (const [evtName, evt] of Object.entries(events)) {
+            const evtType = (evt?.Type as string) ?? '';
+            const evtProps = (evt?.Properties ?? {}) as Record<string, unknown>;
+            const trigger = parseSamEvent(evtName, evtType, evtProps, allResourceTypes);
+            if (trigger) triggers.push(trigger);
           }
         }
 
@@ -126,6 +218,8 @@ const samParser: IaCParser = {
           provider: 'aws',
           attributes,
           envVars: envVars.length > 0 ? envVars : undefined,
+          triggers: triggers.length > 0 ? triggers : undefined,
+          envRefs: envRefs.length > 0 ? envRefs : undefined,
         });
       }
     }
