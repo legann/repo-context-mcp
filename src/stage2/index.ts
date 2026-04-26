@@ -3,10 +3,11 @@ import type {
   SemanticGraph,
   ExportInfo,
   ModuleInfo,
-  InfraResource,
   DomainTier,
+  InfraModuleInfo,
 } from '../types.js';
 import { createEmptyGraph, addNode, addEdge } from '../graph/index.js';
+import { makeServiceId } from '../graph/make-service-id.js';
 import { collectAllDomainTags, STRUCTURAL_DIRS } from './domains.js';
 
 const STRUCTURAL_DIRS_REF = STRUCTURAL_DIRS;
@@ -129,19 +130,100 @@ function resolveHandlerToModuleId(
   const pathPart = parts[0];
   const lambdaPkg = snapshot.packages.find(p => p.path.includes('lambda-functions'));
   if (!lambdaPkg) return undefined;
-  const candidates = [
-    `mod:${lambdaPkg.name}/src/${pathPart}`,
-    `mod:${lambdaPkg.name}/src/${pathPart}/index`,
-  ];
-  for (const id of candidates) {
-    if (modulesById.has(id)) return id;
-  }
-  for (const mod of snapshot.modules) {
-    if (mod.packageName !== lambdaPkg.name) continue;
-    const base = mod.relativeFilePath.replace(/\.(tsx?|jsx?)$/, '').replace(/\/index$/, '');
-    if (base === `src/${pathPart}` || base.endsWith(`/src/${pathPart}`)) return mod.id;
+
+  const bundleMap = snapshot.lambdaBundleHandlerMap ?? {};
+  const bundleSrc = bundleMap[pathPart];
+  const pathCandidates = bundleSrc ? [bundleSrc, pathPart] : [pathPart];
+
+  for (const rel of pathCandidates) {
+    const candidates = [
+      `mod:${lambdaPkg.name}/src/${rel}`,
+      `mod:${lambdaPkg.name}/src/${rel}/index`,
+    ];
+    for (const id of candidates) {
+      if (modulesById.has(id)) return id;
+    }
+    for (const mod of snapshot.modules) {
+      if (mod.packageName !== lambdaPkg.name) continue;
+      const base = mod.relativeFilePath.replace(/\.(tsx?|jsx?)$/, '').replace(/\/index$/, '');
+      if (base === `src/${rel}` || base.endsWith(`/src/${rel}`)) return mod.id;
+    }
   }
   return undefined;
+}
+
+function hasUsesEnvEdge(graph: SemanticGraph, from: string, to: string): boolean {
+  return (graph.outEdges.get(from) ?? []).some(e => e.kind === 'uses_env' && e.to === to);
+}
+
+function hasConsumesEdge(graph: SemanticGraph, queueId: string, lambdaId: string): boolean {
+  return (graph.outEdges.get(queueId) ?? []).some(e => e.kind === 'consumes' && e.to === lambdaId);
+}
+
+/**
+ * Lambdas in compute.yaml reference tables/queues declared in other templates (e.g. data.yaml).
+ * During the first infra pass those targets may not exist yet, so uses_env / consumes are missing.
+ * Link them after all IaC resources are nodes in the graph.
+ */
+function linkDeferredInfraEdges(graph: SemanticGraph, infraModules: InfraModuleInfo[]): void {
+  for (const infraMod of infraModules) {
+    for (const res of infraMod.resources) {
+      if (res.kind !== 'lambda') continue;
+      const serviceId = makeServiceId(res);
+      if (!graph.nodes.has(serviceId)) continue;
+
+      if (res.triggers) {
+        for (const trigger of res.triggers) {
+          if (trigger.type !== 'sqs' || !trigger.queueRef) continue;
+          const queueServiceId = findServiceIdByLogicalId(graph, trigger.queueRef);
+          if (queueServiceId && graph.nodes.has(queueServiceId) && !hasConsumesEdge(graph, queueServiceId, serviceId)) {
+            addEdge(graph, queueServiceId, serviceId, 'consumes');
+          }
+        }
+      }
+
+      if (res.envRefs) {
+        for (const envRef of res.envRefs) {
+          if (!envRef.targetLogicalId) continue;
+          const targetServiceId = findServiceIdByLogicalId(graph, envRef.targetLogicalId);
+          if (targetServiceId && graph.nodes.has(targetServiceId) && !hasUsesEnvEdge(graph, serviceId, targetServiceId)) {
+            addEdge(graph, serviceId, targetServiceId, 'uses_env');
+          }
+        }
+      }
+    }
+  }
+}
+
+function hasBindsToEdge(graph: SemanticGraph, fromModuleId: string, toServiceId: string): boolean {
+  return (graph.outEdges.get(fromModuleId) ?? []).some(e => e.kind === 'binds_to' && e.to === toServiceId);
+}
+
+/**
+ * Handler TS modules inherit Lambda env bindings: module → service (binds_to) for each resolved envRef target.
+ * Lets domain slices reach DynamoDB/SQS/etc. via code modules, not only via Lambda in the slice.
+ */
+function linkHandlerModuleEnvBindings(graph: SemanticGraph, infraModules: InfraModuleInfo[]): void {
+  for (const infraMod of infraModules) {
+    for (const res of infraMod.resources) {
+      if (res.kind !== 'lambda' || !res.envRefs?.length) continue;
+      const serviceId = makeServiceId(res);
+      if (!graph.nodes.has(serviceId)) continue;
+
+      const handlerModId = (graph.outEdges.get(serviceId) ?? []).find(e => e.kind === 'infra')?.to;
+      if (!handlerModId || !handlerModId.startsWith('mod:')) continue;
+      const handlerNode = graph.nodes.get(handlerModId);
+      if (!handlerNode || handlerNode.type !== 'module') continue;
+
+      for (const envRef of res.envRefs) {
+        if (!envRef.targetLogicalId) continue;
+        const targetServiceId = findServiceIdByLogicalId(graph, envRef.targetLogicalId);
+        if (!targetServiceId || !graph.nodes.has(targetServiceId)) continue;
+        if (hasBindsToEdge(graph, handlerModId, targetServiceId)) continue;
+        addEdge(graph, handlerModId, targetServiceId, 'binds_to');
+      }
+    }
+  }
 }
 
 function pass2Infra(
@@ -202,6 +284,7 @@ function pass2Infra(
           envVars: res.envVars,
           triggers: res.triggers,
           envRefs: res.envRefs,
+          contentHash: res.contentHash,
         },
       });
       addEdge(graph, infraModuleId, serviceId, 'contains');
@@ -237,6 +320,9 @@ function pass2Infra(
       }
     }
   }
+
+  linkDeferredInfraEdges(graph, infraModules);
+  linkHandlerModuleEnvBindings(graph, infraModules);
 }
 
 /**
@@ -521,29 +607,31 @@ function shortModuleLabel(relPath: string): string {
   return `…/${parts.slice(-2).join('/')}`;
 }
 
+/**
+ * Nested SAM stacks pass DynamoDB identifiers as parameters (`FooTableName`, `FooTableArn`);
+ * the actual `AWS::DynamoDB::Table` resource is often `FooTable` in another template (e.g. data.yaml).
+ */
+function dynamoTableLogicalIdAliases(logicalId: string): string[] {
+  const out: string[] = [];
+  if (logicalId.endsWith('TableName')) {
+    out.push(logicalId.slice(0, -'TableName'.length) + 'Table');
+  }
+  if (logicalId.endsWith('TableArn')) {
+    out.push(logicalId.slice(0, -'TableArn'.length) + 'Table');
+  }
+  return out;
+}
+
 function findServiceIdByLogicalId(graph: SemanticGraph, logicalId: string): string | undefined {
   const serviceSet = graph.byType.get('service');
   if (!serviceSet) return undefined;
-  for (const id of serviceSet) {
-    const node = graph.nodes.get(id);
-    if (node?.label === logicalId) return id;
+  const tryLabels = [logicalId, ...dynamoTableLogicalIdAliases(logicalId)];
+  for (const label of tryLabels) {
+    for (const id of serviceSet) {
+      const node = graph.nodes.get(id);
+      if (node?.label === label) return id;
+    }
   }
   return undefined;
 }
 
-function makeServiceId(res: InfraResource): string {
-  const base = res.id;
-  if (res.provider === 'aws') {
-    if (res.kind === 'lambda') return `service:aws-lambda:${base}`;
-    if (res.kind === 'queue') return `service:aws-sqs:${base}`;
-    if (res.kind === 'topic') return `service:aws-sns:${base}`;
-    if (res.kind === 'table') return `service:aws-dynamodb:${base}`;
-    if (res.kind === 'api') return `service:aws-api:${base}`;
-    if (res.kind === 'bucket') return `service:aws-s3:${base}`;
-  }
-  if (res.provider === 'k8s') {
-    if (res.kind === 'k8s-deployment') return `service:k8s-deployment:${base}`;
-    if (res.kind === 'k8s-service') return `service:k8s-service:${base}`;
-  }
-  return `service:${res.provider}:${base}`;
-}

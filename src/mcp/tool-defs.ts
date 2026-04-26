@@ -148,7 +148,7 @@ export const toolDefs: ToolDef[] = [
       'Each edge shows how many module-level imports cross the package boundary, and top N examples with imported symbol names. ' +
       'Optionally detects boundary violations (imports bypassing index/public API).',
     schema: z.object({
-      packageId: z.string().optional().describe('Filter to edges involving this package (e.g. "pkg:@dexrx/lambda-functions"). Omit for all.'),
+      packageId: z.string().optional().describe('Filter to edges involving this package (e.g. "pkg:@acme/api-service"). Omit for all.'),
       direction: z.enum(['imports', 'exports', 'both']).optional().describe('"imports" = what packageId imports FROM others. "exports" = what others import FROM packageId. Default: "both".'),
       topN: z.number().int().min(1).max(20).optional().describe('Max symbol examples per edge. Default: 5.'),
     }),

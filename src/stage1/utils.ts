@@ -25,6 +25,7 @@ export function normalizeType(text: string, maxLength = 150): string {
 
 export function makeModuleId(packageName: string, relPath: string): string {
   const normalized = relPath
+    .replace(/\.d\.ts$/i, '')
     .replace(/\.(tsx?|jsx?|mjs|cjs)$/, '')
     .replace(/\/index$/, '');
   return `mod:${packageName}/${normalized}`;

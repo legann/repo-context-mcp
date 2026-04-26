@@ -1,10 +1,4 @@
----
-description: Repo Context MCP — quick reference (always on). Full spec in REPO_CONTEXT_REFERENCE.md; short policy in AGENTS.md — keep in sync when editing.
-globs:
-alwaysApply: true
----
-
-# Repo Context — quick reference
+# Repo Context Engine — quick reference
 
 ## ⛔ STOP — before doing anything in a non-trivial task
 
@@ -16,7 +10,7 @@ If the call fails (connection error) — the HTTP MCP server is not running. **S
 
 ---
 
-MCP server **repo-context** provides **structure** (packages, modules, dependency graph, domains with **tier classification** and **subdomains**, **infra modules and services** — SAM, K8s, Helm, Dockerfile — with Lambda→code links and **runtime topology**: triggers, resource refs, data flows) and **semantic annotations** (summary, assumptions, risks, sideEffects) with **quality scoring**. **Domain aliases** (e.g. query by `kubernetes` or `k8s` → `infra-k8s`) are resolved from `domains.config.json`.
+Repo Context Engine, exposed as MCP server **repo-context**, provides **structure** (packages, modules, dependency graph, domains with **tier classification** and **subdomains**, **infra modules and services** — SAM, K8s, Helm, Dockerfile — with Lambda→code links and **runtime topology**: triggers, resource refs, data flows) and **semantic annotations** (summary, assumptions, risks, sideEffects) with **quality scoring**. **Domain aliases** (e.g. query by `kubernetes` or `k8s` → `infra-k8s`) are resolved from `domains.config.json`.
 
 ## How to call
 
@@ -44,8 +38,8 @@ Four MCP entries: **`repo-context-http`**, **`repo-context-stdio`**, **`repo-con
 
 ## Security
 
-Do not store secrets in the graph or annotations. Repo-context extracts only **env var names** from source; it never reads `.env` or env files.
+Do not store secrets in the graph or annotations. Repo Context Engine extracts only **env var names** from source; it never reads `.env` or env files.
 
 ---
 
-**Full reference:** **`REPO_CONTEXT_REFERENCE.md`** in this package (canonical). **Quick reference:** **`AGENTS.md`**. Cursor rule **repo-context-reference** points at the same markdown file.
+**Full reference:** **`REPO_CONTEXT_REFERENCE.md`** in this package (tools, workflow, file-size rules, semantic annotation, limitations). It is **canonical** and does not depend on `.cursor/`. The Cursor rule **repo-context-reference** is only a pointer to that file.

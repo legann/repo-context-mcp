@@ -14,6 +14,7 @@ import { buildNodeView, pathFromRoot, getImpact } from '../graph/index.js';
 import { graphStats } from '../graph/index.js';
 import type { DomainsConfig } from '../stage2/domains.js';
 import { resolveDomainToCanonical } from '../stage2/domains.js';
+import { resolveServiceResourceContentHash } from '../annotations/service-resource-hash.js';
 
 /** Token -> set of node ids; used for O(1) search instead of scanning all nodes. */
 export type SearchIndex = Map<string, Set<string>>;
@@ -219,10 +220,8 @@ async function handleGetContextDetail(ctx: ToolContext, args: Record<string, unk
       const infraMod = snapshot.infraModules?.find(m => m.id === nodeId);
       fresh = !!infraMod && ann.contentHash === infraMod.contentHash;
     } else if (node.type === 'service') {
-      const inEdges = graph.inEdges.get(nodeId) ?? [];
-      const parentInfraId = inEdges.find(e => e.kind === 'contains')?.from;
-      const infraMod = parentInfraId ? snapshot.infraModules?.find(m => m.id === parentInfraId) : undefined;
-      fresh = !!infraMod && ann.contentHash === infraMod.contentHash;
+      const resourceHash = resolveServiceResourceContentHash(graph, snapshot, nodeId);
+      fresh = !!resourceHash && ann.contentHash === resourceHash;
     } else {
       fresh = true;
     }
@@ -913,10 +912,7 @@ function handleAnnotateModule(ctx: ToolContext, args: Record<string, unknown>): 
     const infraMod = snapshot.infraModules?.find(m => m.id === nodeId);
     contentHash = infraMod?.contentHash ?? 'unknown';
   } else if (node.type === 'service') {
-    const inEdges = graph.inEdges.get(nodeId) ?? [];
-    const parentInfraId = inEdges.find(e => e.kind === 'contains')?.from;
-    const infraMod = parentInfraId ? snapshot.infraModules?.find(m => m.id === parentInfraId) : undefined;
-    contentHash = infraMod?.contentHash ?? 'unknown';
+    contentHash = resolveServiceResourceContentHash(graph, snapshot, nodeId) ?? 'unknown';
   } else {
     contentHash = 'unknown';
   }

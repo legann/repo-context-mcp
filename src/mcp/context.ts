@@ -39,12 +39,17 @@ export class AppContext {
   private readonly cache: SnapshotCache;
   private readonly scanIgnorePatterns: string[];
   private previousSnapshot: SyntacticSnapshot | null = null;
+  private refreshCallbacks: Array<() => void> = [];
 
   private constructor(repoRoot: string, artifactsDir: string, config?: ResolvedConfig) {
     this.repoRoot = repoRoot;
     this.artifactsDir = artifactsDir;
     this.cache = createFileCache(artifactsDir);
     this.scanIgnorePatterns = config?.scan.ignorePatterns ?? [];
+  }
+
+  onRefresh(cb: () => void): void {
+    this.refreshCallbacks.push(cb);
   }
 
   /** Async factory — preferred for MCP server startup. */
@@ -71,7 +76,11 @@ export class AppContext {
     const before = graphStats(this.state.graph);
     this.previousSnapshot = this.state.snapshot;
     this.state = this.buildStateSync();
-    return { before, after: graphStats(this.state.graph) };
+    const after = graphStats(this.state.graph);
+    for (const cb of this.refreshCallbacks) {
+      try { cb(); } catch (e) { console.error('[ui] refresh callback error:', (e as Error).message); }
+    }
+    return { before, after };
   }
 
   private collectSnapshotAndGraph() {
@@ -119,6 +128,10 @@ export class AppContext {
     const { snapshot, modulesById, graph, searchIndex } = this.collectSnapshotAndGraph();
     console.log('Stage 3: Loading annotations...');
     const annotations = await AnnotationStore.create(this.artifactsDir);
+    const migrated = annotations.migrateServiceAnnotationHashesFromParentTemplate(graph, snapshot);
+    if (migrated > 0) {
+      console.log(`  Annotation store: migrated ${migrated} service hash(es) to per-resource scheme`);
+    }
     const domainsConfig = loadDomainsConfig(this.repoRoot);
     const builtAt = new Date().toISOString();
     return { graph, snapshot, modulesById, searchIndex, annotations, domainsConfig, builtAt };
@@ -128,6 +141,10 @@ export class AppContext {
     const { snapshot, modulesById, graph, searchIndex } = this.collectSnapshotAndGraph();
     console.log('Stage 3: Loading annotations...');
     const annotations = AnnotationStore.createSync(this.artifactsDir);
+    const migrated = annotations.migrateServiceAnnotationHashesFromParentTemplate(graph, snapshot);
+    if (migrated > 0) {
+      console.log(`  Annotation store: migrated ${migrated} service hash(es) to per-resource scheme`);
+    }
     const domainsConfig = loadDomainsConfig(this.repoRoot);
     const builtAt = new Date().toISOString();
     return { graph, snapshot, modulesById, searchIndex, annotations, domainsConfig, builtAt };

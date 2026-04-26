@@ -1,18 +1,20 @@
 {
   "mcpServers": {
     "repo-context-http": {
+      "type": "http",
       "url": "http://localhost:3334"
     },
     "repo-context-stdio": {
       "command": "npm",
-      "args": ["run", "mcp", "--silent"]
+      "args": ["run", "mcp", "--prefix", "repo-context", "--silent"]
     },
     "repo-context-http-ui": {
+      "type": "http",
       "url": "http://localhost:3334"
     },
     "repo-context-stdio-ui": {
       "command": "npm",
-      "args": ["run", "mcp:ui", "--silent"],
+      "args": ["run", "mcp:ui", "--prefix", "repo-context", "--silent"],
       "env": {
         "UI_PORT": "3112"
       }

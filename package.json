@@ -1,11 +1,11 @@
 {
   "name": "repo-context",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Structured & semantic repository context for AI agents over MCP",
   "type": "module",
   "main": "dist/index.js",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "license": "MIT",
   "keywords": [
@@ -18,13 +18,19 @@
     "dev": "REPO_CONTEXT_VERBOSE=1 tsx src/index.ts",
     "mcp": "tsx src/mcp/index.ts",
     "mcp:http": "tsx src/mcp/index.ts --http",
+    "mcp:ui": "tsx src/mcp/index.ts --ui",
+    "ui": "tsx src/mcp/index.ts --http --ui",
+    "ui:build": "npm run build --prefix ui",
+    "ui:dev": "npm run dev --prefix ui",
+    "ui:test": "npm test --prefix ui",
     "dump": "tsx src/dump/index.ts",
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.config.cjs",
     "test:unit": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.config.cjs --testPathIgnorePatterns=integration",
     "test:integration": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.config.cjs --testPathPattern=integration",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
-    "lint:fix": "eslint src --fix"
+    "lint:fix": "eslint src --fix",
+    "annotations:resync-hashes": "tsx scripts/resync-annotation-hashes.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.27.1",
@@ -34,14 +40,14 @@
   },
   "devDependencies": {
     "@types/jest": "30.0.0",
-    "@types/node": "20.19.35",
-    "@typescript-eslint/eslint-plugin": "8.56.1",
-    "@typescript-eslint/parser": "8.56.1",
+    "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "8.58.0",
+    "@typescript-eslint/parser": "8.58.0",
     "eslint": "9.39.3",
     "jest": "30.2.0",
-    "ts-jest": "29.4.6",
+    "ts-jest": "29.4.9",
     "tsx": "4.21.0",
-    "typescript": "5.9.3"
+    "typescript": "^6.0.0"
   },
   "repository": {
     "type": "git",

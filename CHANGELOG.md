@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-04-26
+
+### Added
+- **UI graph browser** (optional, `npm run ui` / `mcp:ui`, `UI_PORT`): browser viewer for the live repo graph (domains, modules, services, infra) — explore and search, inspect node details, shareable links, exports (image / JSON), live refresh when context is rebuilt. Use it as a **visual map** of the repository and as **living documentation** that reflects the repository.
+- **Claude Code & Codex support** — project-scoped MCP configs shipped with the package: **`.mcp.json`** for Claude Code, **`.codex/config.toml`** `[mcp_servers.*]` for Codex (same four server names, HTTP **3334**, stdio commands as Cursor). **`CLAUDE.md`** loads **`AGENTS.md`** via `@AGENTS.md`; quick workflow and policy stay in **`AGENTS.md`**.
+- **`repo-context.config.json`** — optional package-local config (Zod-validated) for **HTTP server** bind address/port (overridable via `REPO_CONTEXT_PORT`), **`scan.ignorePatterns`** for extra paths to skip when indexing the repo.
+
+### Changed
+- **Agent documentation (to support Claude Code, Codex, and Cursor together):** long-form MCP guide is **`REPO_CONTEXT_REFERENCE.md`** at package root (tools, workflow, file-size rules, semantic annotation, limitations); **`AGENTS.md`** is **quick reference only**. When this package sits in a monorepo, host **`AGENTS.md`** links to **`repo-context/REPO_CONTEXT_REFERENCE.md`** instead of inlining the full guide.
+- **Cursor rules:** **`.cursor/rules/repo-context-reference.mdc`** is a short pointer to **`REPO_CONTEXT_REFERENCE.md`** (canonical copy not locked under `.cursor/`). **`.cursor/rules/repo-context.mdc`** quick reference aligned with **`AGENTS.md`** (monorepo `--prefix` vs standalone).
+- **Claude Code / Codex onboarding:** **`CLAUDE.md`** points to **`REPO_CONTEXT_REFERENCE.md`** for depth beyond **`AGENTS.md`**; **`.codex/config.toml`** header comments document that split for Codex’s project-doc flow.
+
 ## [0.2.0] - 2026-03-17
 
 Domain intelligence, runtime topology, annotation quality, and orphaned annotation management.

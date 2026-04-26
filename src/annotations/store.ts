@@ -4,6 +4,12 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import type { StoredAnnotation, SemanticGraph, SyntacticSnapshot } from '../types.js';
 import { CURRENT_ANNOTATION_SCHEMA_VERSION } from '../types.js';
+import {
+  resolveServiceResourceContentHash,
+  getParentInfraModuleId,
+  getParentInfraContentHash,
+  getResourceContentHashForServiceId,
+} from './service-resource-hash.js';
 
 // ── Zod schemas for runtime validation ──
 
@@ -549,15 +555,15 @@ export class AnnotationStore {
       });
     }
 
-    // Service nodes (Lambda, SQS, etc.) — freshness from parent infra module contentHash
+    // Service nodes — freshness from per-resource IaC fragment hash (not whole template)
     const serviceSet = graph.byType.get('service');
     const serviceIds = serviceSet ? Array.from(serviceSet) : [];
     for (const serviceId of serviceIds) {
-      const inEdges = graph.inEdges.get(serviceId) ?? [];
-      const containsFrom = inEdges.find(e => e.kind === 'contains');
-      const parentInfraId = containsFrom?.from;
-      const parentHash = parentInfraId ? infraModuleIdToHash.get(parentInfraId) : undefined;
-      if (parentHash === undefined || !parentInfraId) continue;
+      const parentInfraId = getParentInfraModuleId(graph, serviceId);
+      if (!parentInfraId) continue;
+
+      const resourceHash = resolveServiceResourceContentHash(graph, snapshot, serviceId);
+      if (resourceHash === undefined) continue;
 
       if (domain) {
         const domainId = domain.startsWith('domain:') ? domain : `domain:${domain}`;
@@ -568,7 +574,7 @@ export class AnnotationStore {
 
       const ann = this.data[serviceId];
       const schemaOutdated = ann && ((ann.schemaVersion ?? 1) < CURRENT_ANNOTATION_SCHEMA_VERSION);
-      const contentStale = ann && ann.contentHash !== parentHash;
+      const contentStale = ann && ann.contentHash !== resourceHash;
       let status: 'unannotated' | 'stale';
       if (!ann) {
         status = 'unannotated';
@@ -584,7 +590,7 @@ export class AnnotationStore {
         : [];
       const priority = (status === 'stale' ? 1000 : 0) + 1;
       const reason = status === 'stale'
-        ? (schemaOutdated && !contentStale ? 'Schema outdated' : 'Parent IaC template changed')
+        ? (schemaOutdated && !contentStale ? 'Schema outdated' : 'IaC resource definition changed')
         : 'Service resource not yet annotated';
 
       items.push({
@@ -689,13 +695,12 @@ export class AnnotationStore {
     let svcFresh = 0;
     let svcStale = 0;
     for (const serviceId of serviceIds) {
-      const inEdges = graph.inEdges.get(serviceId) ?? [];
-      const parentInfraId = inEdges.find(e => e.kind === 'contains')?.from;
-      const parentHash = parentInfraId ? infraModuleIdToHash.get(parentInfraId) : undefined;
-      if (parentHash === undefined) continue;
+      const resourceHash = resolveServiceResourceContentHash(graph, snapshot, serviceId);
+      if (resourceHash === undefined) continue;
+      const parentInfraId = getParentInfraModuleId(graph, serviceId);
       const ann = this.data[serviceId];
       const isAnnotated = ann !== undefined;
-      const isFresh = isAnnotated && ann.contentHash === parentHash && (ann.schemaVersion ?? 1) >= CURRENT_ANNOTATION_SCHEMA_VERSION;
+      const isFresh = isAnnotated && ann.contentHash === resourceHash && (ann.schemaVersion ?? 1) >= CURRENT_ANNOTATION_SCHEMA_VERSION;
       if (isAnnotated) {
         svcAnnotated++;
         if (isFresh) svcFresh++;
@@ -762,5 +767,33 @@ export class AnnotationStore {
         list: domainList,
       },
     };
+  }
+
+  /**
+   * Legacy: service annotations used to store the parent template file hash. When that value still
+   * matches the current parent module hash, rewrite to the per-resource fragment hash (no pass bump).
+   */
+  migrateServiceAnnotationHashesFromParentTemplate(
+    graph: SemanticGraph,
+    snapshot: SyntacticSnapshot,
+  ): number {
+    let updated = 0;
+    for (const [nodeId, ann] of Object.entries(this.data)) {
+      if (ann.nodeType !== 'service') continue;
+      const resourceHash = getResourceContentHashForServiceId(snapshot, nodeId);
+      if (!resourceHash || ann.contentHash === resourceHash) continue;
+      const parentId = getParentInfraModuleId(graph, nodeId);
+      if (!parentId) continue;
+      const parentHash = getParentInfraContentHash(snapshot, parentId);
+      if (!parentHash || ann.contentHash !== parentHash) continue;
+      this.data[nodeId] = {
+        ...ann,
+        contentHash: resourceHash,
+        updatedAt: new Date().toISOString(),
+      };
+      updated++;
+    }
+    if (updated > 0) this.scheduleSave();
+    return updated;
   }
 }

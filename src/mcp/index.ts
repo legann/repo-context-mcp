@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 const useHttp = process.argv.includes('--http');
+const useUi = process.argv.includes('--ui') || !!process.env.UI_PORT;
 const stdioVerbose = process.env.REPO_CONTEXT_VERBOSE === '1';
 const stdioShowLogs = typeof process.stderr?.isTTY === 'boolean' ? process.stderr.isTTY : false;
 
@@ -42,6 +43,30 @@ function isToolError(result: unknown): result is { error: string } {
     typeof (result as { error: unknown }).error === 'string'
   );
 }
+
+/**
+ * MCP tools/call result (2024-11-05): use isError=true for execution failures so clients/models
+ * distinguish validation/business errors from success payloads.
+ */
+function toCallToolMcpResult(result: unknown): {
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: boolean;
+} {
+  const text = JSON.stringify(result, null, 2);
+  if (isToolError(result)) {
+    return { content: [{ type: 'text', text }], isError: true };
+  }
+  return { content: [{ type: 'text', text }] };
+}
+
+/** Shown in initialize.instructions (HTTP + stdio) — guides models on tools/list and tools/call. */
+const REPO_CONTEXT_MCP_INSTRUCTIONS =
+  'Repo Context exposes MCP tools for repository graph and semantic annotations. ' +
+  'Discover tools with method tools/list (each entry: name, description, inputSchema). ' +
+  'Call a tool with method tools/call and params { name: "<tool_name>", arguments: { ... } }. ' +
+  'Always pass arguments as a JSON object; if a tool has no parameters, pass {}. ' +
+  'Required argument names are listed in inputSchema.required. ' +
+  'Successful results and structured errors are JSON in content[0].text; if isError is true, fix arguments or server state.';
 
 function logToolError(toolName: string, message: string): void {
   console.error(`  [${toolName}] error: ${message}`);
@@ -192,7 +217,12 @@ async function handleRequest(ctx: AppContext, req: MCPRequest): Promise<MCPRespo
         result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'repo-context-mcp', version: '0.1.0' },
+          serverInfo: {
+            name: 'repo-context-mcp',
+            version: '0.1.0',
+            title: 'Repo Context',
+          },
+          instructions: REPO_CONTEXT_MCP_INSTRUCTIONS,
         },
       };
 
@@ -212,18 +242,23 @@ async function handleRequest(ctx: AppContext, req: MCPRequest): Promise<MCPRespo
         if (isToolError(result)) {
           logToolError(name, result.error);
         }
-        const text = JSON.stringify(result, null, 2);
-        trackCall(name, text);
+        const out = toCallToolMcpResult(result);
+        trackCall(name, out.content[0].text);
         return {
           jsonrpc: '2.0', id: req.id,
-          result: { content: [{ type: 'text', text }] },
+          result: out,
         };
       } catch (e) {
         const message = (e as Error).message;
         logToolError(name, message);
+        const text = JSON.stringify({ error: message }, null, 2);
+        trackCall(name, text);
         return {
           jsonrpc: '2.0', id: req.id,
-          error: { code: -32603, message },
+          result: {
+            content: [{ type: 'text', text }],
+            isError: true,
+          },
         };
       }
     }
@@ -236,7 +271,10 @@ async function handleRequest(ctx: AppContext, req: MCPRequest): Promise<MCPRespo
 // ── Stdio mode (MCP SDK) ──
 
 async function runStdio(ctx: AppContext): Promise<void> {
-  const mcpServer = new McpServer({ name: 'repo-context-mcp', version: '0.1.0' });
+  const mcpServer = new McpServer(
+    { name: 'repo-context-mcp', version: '0.1.0', title: 'Repo Context' },
+    { instructions: REPO_CONTEXT_MCP_INSTRUCTIONS },
+  );
 
   for (const def of toolDefs) {
     const name = def.name;
@@ -249,13 +287,18 @@ async function runStdio(ctx: AppContext): Promise<void> {
       try {
         const result = await Promise.resolve(executeTool(ctx, name, safeArgs));
         if (isToolError(result)) logToolError(name, result.error);
-        const text = JSON.stringify(result, null, 2);
-        trackCall(name, text);
-        return { content: [{ type: 'text' as const, text }] };
+        const out = toCallToolMcpResult(result);
+        trackCall(name, out.content[0].text);
+        return out;
       } catch (e) {
         const message = (e as Error).message;
         logToolError(name, message);
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ error: message }, null, 2) }] };
+        const text = JSON.stringify({ error: message }, null, 2);
+        trackCall(name, text);
+        return {
+          content: [{ type: 'text' as const, text }],
+          isError: true,
+        };
       }
     });
   }
@@ -267,21 +310,52 @@ async function runStdio(ctx: AppContext): Promise<void> {
 
 // ── Graceful shutdown ──
 
-function setupGracefulShutdown(ctx: AppContext): void {
+function createShutdownHandler(
+  ctx: AppContext,
+  afterFlushHooks: Array<() => Promise<void>> = [],
+): (reason: string) => Promise<void> {
   let shuttingDown = false;
-  const shutdown = (signal: string) => {
+  return async (reason: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`\n  Received ${signal}, flushing annotations and shutting down...`);
+    console.log(`\n  Shutting down (${reason}) — flush annotations, stop sidecars...`);
     try {
       ctx.getState().annotations.flush();
     } catch (e) {
       console.error('  [ALERT] Failed to flush annotations on shutdown:', (e as Error).message);
     }
+    for (const hook of afterFlushHooks) {
+      try {
+        await hook();
+      } catch (e) {
+        console.error('  [shutdown]', (e as Error).message);
+      }
+    }
     process.exit(0);
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+function registerProcessSignals(requestShutdown: (reason: string) => Promise<void>): void {
+  process.on('SIGINT', () => {
+    void requestShutdown('SIGINT');
+  });
+  process.on('SIGTERM', () => {
+    void requestShutdown('SIGTERM');
+  });
+}
+
+/**
+ * When the MCP host disables the server it usually closes the stdio pipe (stdin EOF) without SIGTERM.
+ * Without this, Node keeps running because the ui HTTP server (and open handles) hold the event loop.
+ */
+function registerStdioDisconnectShutdown(requestShutdown: (reason: string) => Promise<void>): void {
+  const stdin = process.stdin;
+  stdin.on('end', () => {
+    void requestShutdown('stdin-closed');
+  });
+  stdin.on('error', () => {
+    void requestShutdown('stdin-error');
+  });
 }
 
 // ── Main ──
@@ -290,11 +364,23 @@ async function main(): Promise<void> {
   const cfg = loadConfig(packageRoot);
   console.log(`Building repo context for: ${repoRoot}`);
   const ctx = await AppContext.create(repoRoot, artifactsDir, cfg);
-  setupGracefulShutdown(ctx);
+
+  const shutdownHooks: Array<() => Promise<void>> = [];
+
+  if (useUi) {
+    const { startUiServer } = await import('./ui-server.js');
+    const uiPort = parseInt(process.env.UI_PORT ?? '3112', 10);
+    const ui = await startUiServer(ctx, { port: uiPort });
+    shutdownHooks.push(ui.stop);
+  }
+
+  const requestShutdown = createShutdownHandler(ctx, shutdownHooks);
+  registerProcessSignals(requestShutdown);
 
   if (useHttp) {
     startServer(ctx, cfg);
   } else {
+    registerStdioDisconnectShutdown(requestShutdown);
     await runStdio(ctx);
   }
 }

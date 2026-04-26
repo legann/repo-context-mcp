@@ -142,6 +142,8 @@ export interface InfraResource {
   id: string;
   kind: InfraResourceKind;
   provider: 'aws' | 'k8s' | 'generic';
+  /** Fingerprint of this resource’s IaC fragment only (not the whole template file). Used for service annotation freshness. */
+  contentHash: string;
   attributes: Record<string, string>;
   envVars?: string[];
   links?: string[];
@@ -164,6 +166,11 @@ export interface SyntacticSnapshot {
   packages: PackageInfo[];
   modules: ModuleInfo[];
   infraModules?: InfraModuleInfo[];
+  /**
+   * SAM Handler path (before `.handler`) → `src/`-relative TS path without extension,
+   * when esbuild output path differs from source (from configured bundle scripts).
+   */
+  lambdaBundleHandlerMap?: Record<string, string>;
 }
 
 // ── Stage 2: Semantic Graph ──
@@ -212,6 +219,8 @@ export interface ServiceNodeData {
   envVars?: string[];
   triggers?: InfraTrigger[];
   envRefs?: InfraEnvRef[];
+  /** Same as InfraResource.contentHash for this service’s backing resource. */
+  contentHash?: string;
 }
 
 export type NodeDataByType = {

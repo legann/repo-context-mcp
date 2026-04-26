@@ -1,4 +1,10 @@
 {
+  "infraExclude": [
+    "infrastructure/sam/template.yaml"
+  ],
+  "lambdaBundleScripts": [
+    "packages/lambda-functions/scripts/bundle.js"
+  ],
   "domainAliases": {
     "infra-k8s": ["infra-kubernetes", "k8s", "kubernetes"]
   },

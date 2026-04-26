@@ -1,0 +1,29 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+#
+# Project-scoped Codex MCP config (applied when this repository is trusted).
+# Keep in sync with `.cursor/mcp.json` and `.mcp.json`.
+#
+# HTTP: run `npm run mcp:http` (plain) or `npm run ui` (HTTP + graph viewer on UI_PORT)
+# in `repo-context`. Both use MCP POST http://localhost:3334/ — enable only one HTTP entry at a time.
+#
+# Agent docs: `AGENTS.md` is the quick Repo Context policy; full MCP tool/workflow/annotation
+# reference is `repo-context/REPO_CONTEXT_REFERENCE.md` (use Read when you need that depth).
+# Raised cap leaves headroom for growth. See:
+# https://developers.openai.com/codex/guides/agents-md
+
+project_doc_max_bytes = 65536
+
+# [mcp_servers.repo-context-http]
+# url = "http://localhost:3334"
+
+# [mcp_servers.repo-context-stdio]
+# command = "npm"
+# args = ["run", "mcp", "--prefix", "repo-context", "--silent"]
+
+# [mcp_servers.repo-context-http-ui]
+# url = "http://localhost:3334"
+
+# [mcp_servers.repo-context-stdio-ui]
+# command = "npm"
+# args = ["run", "mcp:ui", "--prefix", "repo-context", "--silent"]
+# env = { UI_PORT = "3112" }

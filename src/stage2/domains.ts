@@ -154,6 +154,15 @@ export interface DomainsConfig {
   patterns?: Array<{ pattern: string; domain: string }>;
   /** Canonical domain -> list of aliases. Queries by alias resolve to the canonical (e.g. "kubernetes" -> "infra-k8s"). */
   domainAliases?: Record<string, string[]>;
+  /**
+   * Repo-root-relative path substrings; matching IaC files are skipped (e.g. root `template.yaml` when using nested stacks only).
+   */
+  infraExclude?: string[];
+  /**
+   * Repo-root-relative paths to bundle scripts (`bundle.js` style: `entryPoint` + `outputFile` array).
+   * If omitted, `packages/lambda-functions/scripts/bundle.js` is tried when present. Use `[]` to disable.
+   */
+  lambdaBundleScripts?: string[];
   /** Precomputed alias (lowercase) -> canonical; set by loadDomainsConfig for O(1) resolve. */
   _aliasToCanonical?: Record<string, string>;
 }

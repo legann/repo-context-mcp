@@ -5,6 +5,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Accidental emit next to .ts (wrong tsc cwd / outDir) — breaks Jest ESM (.js resolves to stale file)
+src/**/*.js
+src/**/*.js.map
+
 # Cache (snapshot, graph; regeneratable by dev/mcp/dump)
 .cache/
 artifacts/

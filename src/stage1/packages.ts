@@ -4,7 +4,8 @@ import type { PackageInfo } from '../types.js';
 import { SELF_TSCONFIG_REL } from '../paths.js';
 
 const SELF_PACKAGE = 'repo-context';
-const DISCOVER_SKIP = /\/(node_modules|\.git|dist|dist-bundled|\.next|__tests__|__mocks__|\.cache)(\/|$)/;
+const DISCOVER_SKIP =
+  /\/(node_modules|\.git|dist|dist-bundled|\.next|__tests__|__mocks__|__snapshots__|\.cache|tests|e2e|cypress|playwright)(\/|$)/;
 
 export function discoverPackages(repoRoot: string): PackageInfo[] {
   const tsconfigDirs = findAllTsconfigDirs(repoRoot);
@@ -28,7 +29,7 @@ export function discoverPackages(repoRoot: string): PackageInfo[] {
 function findAllTsconfigDirs(repoRoot: string): string[] {
   const result: string[] = [];
   function walk(dir: string) {
-    if (DISCOVER_SKIP.test(dir)) return;
+    if (DISCOVER_SKIP.test(dir.split(path.sep).join('/'))) return;
     const tsconfigPath = path.join(dir, 'tsconfig.json');
     if (fs.existsSync(tsconfigPath)) {
       const rel = path.relative(repoRoot, dir);

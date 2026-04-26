@@ -9,8 +9,25 @@ import { collectExports } from './exports.js';
 import { collectContentHints } from './content-hints.js';
 import { makeModuleId, pathPrefixLength } from './utils.js';
 import { collectInfraModules } from './infra.js';
+import { loadDomainsConfig } from '../stage2/domains.js';
+import { loadLambdaBundleHandlerMap } from '../stage2/lambda-bundle-loader.js';
 
-const SKIP_PATTERN = /\/(dist|dist-bundled|node_modules|\.next|__tests__|__mocks__|\.cache)\//;
+/** Normalized path (forward slashes): skip these directory subtrees. */
+const SKIP_PATH_SUBTREE_RE =
+  /\/(?:dist|dist-bundled|node_modules|\.next|__tests__|__mocks__|__snapshots__|\.cache|tests|e2e|cypress|playwright|__e2e__)(?:\/|$)/;
+
+/** Basename: conventional test files anywhere in the tree (e.g. foo.test.ts, bar.spec.tsx). */
+const SKIP_TEST_FILENAME_RE = /\.(?:test|spec)\.(?:[cm]?[jt]sx?|jsx?|cjs|mjs)$/i;
+
+/** Source maps are never repo-context modules. */
+const SKIP_MAP_FILE_RE = /\.(?:js|mjs|cjs|css|ts|tsx|jsx)\.map$/i;
+
+/**
+ * `path.extname('*.d.ts')` is `.ts`, so declaration files would otherwise be scanned as TS.
+ * Keep only this hand-authored ambient module (repo-root-relative, forward slashes).
+ */
+const ALLOWED_DECLARATION_FILE_REL = 'packages/lambda-shared/src/types/tenant-secrets-manager.d.ts';
+
 const SELF_PACKAGE = 'repo-context';
 const SUPPORTED_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx']);
 
@@ -61,17 +78,25 @@ export function collectSyntacticSnapshot(
     for (const sf of project.getSourceFiles()) {
       const filePath = sf.getFilePath();
       if (!filePath.startsWith(pkgAbsPath + '/')) continue;
-      if (SKIP_PATTERN.test(filePath)) continue;
+      const normPath = filePath.split(path.sep).join('/');
+      if (SKIP_PATH_SUBTREE_RE.test(normPath)) continue;
+      if (SKIP_TEST_FILENAME_RE.test(path.basename(filePath))) continue;
+      if (SKIP_MAP_FILE_RE.test(path.basename(filePath))) continue;
+
+      const relFromRoot = path.normalize(path.relative(repoRoot, filePath)).split(path.sep).join('/');
       if (extraIgnore.length > 0) {
-        const relFromRoot = path.relative(repoRoot, filePath);
         if (extraIgnore.some(p => relFromRoot.includes(p))) continue;
       }
+
+      if (normPath.endsWith('.d.ts')) {
+        if (relFromRoot !== ALLOWED_DECLARATION_FILE_REL) continue;
+      }
+
       const ext = path.extname(filePath).toLowerCase();
       if (!SUPPORTED_EXTENSIONS.has(ext)) continue;
 
       const relPath = path.relative(pkgAbsPath, filePath);
-      const relFromRoot = path.relative(repoRoot, filePath);
-      if (path.normalize(relFromRoot).startsWith(path.normalize(SELF_TSCONFIG_REL + '/'))) continue;
+      if (relFromRoot.startsWith(`${SELF_TSCONFIG_REL}/`)) continue;
       const moduleId = makeModuleId(pkg.name, relPath);
       const existing = pendingByPath.get(filePath);
       if (!existing || pathPrefixLength(pkg.path, relFromRoot) > pathPrefixLength(existing.pkg.path, relFromRoot)) {
@@ -141,7 +166,15 @@ export function collectSyntacticSnapshot(
     }
   }
 
-  const infraModules = collectInfraModules({ repoRoot, packages });
+  const domainsConfig = loadDomainsConfig(repoRoot);
+  const infraExclude = domainsConfig?.infraExclude;
+  const lambdaBundleHandlerMap = loadLambdaBundleHandlerMap(repoRoot, domainsConfig);
+
+  const infraModules = collectInfraModules({
+    repoRoot,
+    packages,
+    excludePatterns: infraExclude?.length ? infraExclude : undefined,
+  });
   const totalInfraResources = infraModules?.reduce((n, m) => n + m.resources.length, 0) ?? 0;
   if (infraModules.length > 0) {
     console.log(`  Infra: ${infraModules.length} module(s), ${totalInfraResources} resource(s)`);
@@ -153,5 +186,8 @@ export function collectSyntacticSnapshot(
     packages,
     modules: allModules,
     infraModules,
+    ...(Object.keys(lambdaBundleHandlerMap).length > 0
+      ? { lambdaBundleHandlerMap }
+      : {}),
   };
 }

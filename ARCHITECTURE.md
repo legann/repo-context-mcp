@@ -1,6 +1,6 @@
-# Architecture: Three Stages
+# Repo Context Engine Architecture
 
-Repo-context builds context in three stages: a syntactic snapshot, a semantic graph, and an optional layer of AI annotations.
+Repo Context Engine builds a local repository understanding layer in three stages: a syntactic snapshot, a semantic graph, and a persisted layer of AI annotations.
 
 ---
 
@@ -9,7 +9,7 @@ Repo-context builds context in three stages: a syntactic snapshot, a semantic gr
 **Input:** repo root path.  
 **Output:** `SyntacticSnapshot` = `{ repoRoot, timestamp, packages[], modules[], infraModules[] }`.
 
-- **Package discovery:** The repo is scanned for all **`tsconfig.json`** files (recursively; `node_modules`, `.git`, `dist`, `.cache` are skipped). Each directory that contains a `tsconfig.json` is treated as one **package** (project). Package name is taken from `package.json` in that directory if present, otherwise derived from the path (e.g. `packages/client-ui` -> `packages-client-ui`). This works for monorepos, single-package repos, and repos with several independent apps. No `workspaces` field is required.
+- **Package discovery:** The repo is scanned for all **`tsconfig.json`** files (recursively; `node_modules`, `.git`, `dist`, `.cache` are skipped). Each directory that contains a `tsconfig.json` is treated as one **package** (project). Package name is taken from `package.json` in that directory if present, otherwise derived from the path (e.g. `packages/client-ui` -> `packages-client-ui`). This works for multi-package repositories, single-package repos, and repos with several independent apps. No `workspaces` field is required.
 - **File types:** `.ts`, `.tsx`, `.js`, `.jsx` (ts-morph with `allowJs: true`). Module id strips these extensions (and `.mjs`/`.cjs` when present).
 - **Module id:** `mod:{packageName}/{relativeFilePath}` (extension stripped), e.g. `mod:package-name/src/path/to/module`.
 - **Per module we collect:**
@@ -110,7 +110,7 @@ Subdomains are `domain`-type nodes with `data.parent` pointing to the parent dom
 
 ## Stage 3: Semantic Annotations
 
-Annotations are **AI-generated** and stored in `artifacts/annotations.json`. They are keyed by **node id** (usually module id). Each record has:
+Annotations are **AI-generated**, stored in `artifacts/annotations.json`, and committed with the repository. They form the repository's initial semantic map: an agent builds them by working through the annotation queue, reading relevant modules, and writing explanations back to graph nodes. They are keyed by **node id** (usually module id) and explain relationships, assumptions, risks, and architectural intent that are not obvious from deterministic graph edges alone. Each record has:
 
 - `nodeId`, `nodeType`, `contentHash`, `pass`, `updatedAt`, `schemaVersion`, `semantic`.
 
@@ -123,7 +123,7 @@ Annotations are **AI-generated** and stored in `artifacts/annotations.json`. The
 
 Annotations are **not** tied to the set of domains; they are per-node. Adding more domains (more edges) does not invalidate annotations.
 
-**Infra and services:** Annotations are supported for **infra module** nodes and **service** nodes (Lambda, SQS, K8s Deployment, etc.). For services, freshness is derived from the parent infra module's `contentHash`. The annotation queue and coverage stats include infra modules and services; the same `write_module_annotation` tool is used (by node id, e.g. `infra:helm:path/to/Chart.yaml` or `service:aws-lambda:MyFunction`).
+**Infra and services:** Annotations are supported for **infra module** nodes and **service** nodes (Lambda, SQS, K8s Deployment, etc.). **Infra module** rows stay tied to the whole template/file hash. **Service** rows use a **per-resource** fingerprint: the parsed CloudFormation/SAM resource object (or k8s/helm/dockerfile payload) is hashed, so editing another resource in the same template does not mark unrelated services stale. On MCP context load, `migrateServiceAnnotationHashesFromParentTemplate` rewrites legacy entries that still store the parent file hash (when it matches the current parent) to the per-resource hash without bumping `pass`.
 
 ### Orphaned Annotations
 

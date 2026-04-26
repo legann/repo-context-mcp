@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Repo Context — Ui Graph</title>
+  </head>
+  <body>
+    <div id="app" data-ui-build="vite-bundle">
+      <aside id="sidebar">
+        <div class="sidebar-header">
+          <button type="button" id="btn-sidebar-toggle" aria-label="Toggle sidebar">☰</button>
+          <h1>Repo Context</h1>
+          <div id="status-dot" class="status-dot" title="SSE disconnected"></div>
+        </div>
+        <div class="nav-bar" id="nav-bar">
+          <span class="nav-current">Domain Overview</span>
+        </div>
+        <div class="search-bar">
+          <input id="search" type="search" placeholder="Search…" autocomplete="off" />
+        </div>
+        <div id="overview-tier-section" class="sidebar-filter-block" hidden>
+          <div class="sidebar-section-title">Tier — show / hide on overview</div>
+          <div id="overview-tier-chips" class="filter-chips" aria-label="Filter by domain tier"></div>
+        </div>
+        <div id="filter-section" class="sidebar-filter-block" hidden>
+          <div class="sidebar-section-title">Filters — click to show / hide lists</div>
+          <div id="filter-chips" class="filter-chips" aria-label="Filter by kind"></div>
+        </div>
+        <div id="edge-kind-section" hidden>
+          <div class="sidebar-section-title">Edge kinds (detail graph)</div>
+          <div id="edge-kind-list"></div>
+        </div>
+        <div class="sidebar-section-title" id="legend-title" hidden>Graph key</div>
+        <div id="legend" class="legend"></div>
+        <div class="sidebar-scroll" id="sidebar-list"></div>
+      </aside>
+
+      <div class="sidebar-backdrop" id="sidebar-backdrop" aria-hidden="true"></div>
+
+      <main id="canvas-container">
+        <div class="view-badge" id="view-badge">Domain Overview</div>
+        <div class="view-controls">
+          <div class="layout-btns">
+            <button type="button" data-dir="TB">TB</button>
+            <button type="button" data-dir="LR" class="active">LR</button>
+          </div>
+          <button type="button" id="btn-fit">Fit</button>
+          <div class="graph-tools">
+            <label title="Base edge opacity (dense graphs)">
+              Edges
+              <input type="range" id="edge-opacity" min="0.08" max="1" step="0.02" />
+            </label>
+            <button type="button" id="btn-export-png">PNG</button>
+            <button type="button" id="btn-export-json">JSON</button>
+            <button type="button" id="btn-debug">Debug</button>
+          </div>
+        </div>
+        <div id="cy"></div>
+        <aside id="detail-panel">
+          <div id="detail-panel-header">
+            <h2>Detail</h2>
+            <button type="button" id="btn-close-detail" title="Close">✕</button>
+          </div>
+          <div id="detail-scroll"></div>
+        </aside>
+      </main>
+    </div>
+
+    <footer id="status-bar">
+      <span id="stat-info">Loading…</span>
+      <span id="stat-refresh" style="flex: 1; text-align: right"></span>
+    </footer>
+
+    <div id="debug-panel">
+      <header>
+        <span>Debug</span>
+        <button type="button" id="btn-debug-close">Close</button>
+      </header>
+      <pre id="debug-json"></pre>
+      <div style="padding: 8px 10px; border-top: 1px solid var(--border)">
+        <button type="button" id="btn-copy-debug">Copy JSON</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

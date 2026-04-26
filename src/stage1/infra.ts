@@ -39,6 +39,18 @@ const CLOUDFORMATION_SAFE_SCHEMA = yaml.DEFAULT_SCHEMA.extend([
 export interface InfraScanOptions {
   repoRoot: string;
   packages: PackageInfo[];
+  /** Repo-root-relative path fragments; matching files are skipped (see `domains.config.json` `infraExclude`). */
+  excludePatterns?: string[];
+}
+
+function matchesInfraExclude(relPath: string, patterns: string[] | undefined): boolean {
+  if (!patterns?.length) return false;
+  const norm = relPath.replace(/\\/g, '/');
+  for (const p of patterns) {
+    const q = p.replace(/\\/g, '/').replace(/^\//, '');
+    if (norm === q || norm.endsWith('/' + q)) return true;
+  }
+  return false;
 }
 
 export interface IaCParser {
@@ -63,6 +75,64 @@ const samResourceKindMap: Record<string, InfraResourceKind> = {
  * Extract a CloudFormation reference from a YAML value.
  * Handles !Ref, !GetAtt, Fn::Ref, Fn::GetAtt, and !Sub with variable references.
  */
+function logicalIdIsDynamoDbTable(logicalId: string, allResourceTypes: Map<string, string>): boolean {
+  return allResourceTypes.get(logicalId) === 'AWS::DynamoDB::Table';
+}
+
+/** Walk a policy fragment (!Ref, !GetAtt, nested objects) and collect DynamoDB table logical IDs. */
+function collectDynamoTableRefsInValue(
+  node: unknown,
+  allResourceTypes: Map<string, string>,
+  out: Set<string>,
+): void {
+  if (node === null || node === undefined) return;
+  if (typeof node === 'string') {
+    if (logicalIdIsDynamoDbTable(node, allResourceTypes)) out.add(node);
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const x of node) collectDynamoTableRefsInValue(x, allResourceTypes, out);
+    return;
+  }
+  if (typeof node !== 'object') return;
+  const o = node as Record<string, unknown>;
+  if ('Ref' in o && typeof o.Ref === 'string' && logicalIdIsDynamoDbTable(o.Ref, allResourceTypes)) {
+    out.add(o.Ref);
+  }
+  if ('Fn::GetAtt' in o) {
+    const ga = o['Fn::GetAtt'];
+    const first = Array.isArray(ga) && typeof ga[0] === 'string' ? ga[0]
+      : typeof ga === 'string' ? ga.split('.')[0] : undefined;
+    if (first && logicalIdIsDynamoDbTable(first, allResourceTypes)) out.add(first);
+  }
+  for (const v of Object.values(o)) collectDynamoTableRefsInValue(v, allResourceTypes, out);
+}
+
+/** Attach DynamoDB table refs from Lambda Policies (inline + !Ref ManagedPolicy). */
+function appendDynamoRefsFromLambdaPolicies(
+  policies: unknown,
+  policyIdToTables: Map<string, string[]>,
+  allResourceTypes: Map<string, string>,
+  envRefs: InfraEnvRef[],
+  seenTableIds: Set<string>,
+): void {
+  if (!Array.isArray(policies)) return;
+  for (const pol of policies) {
+    const fromPol = new Set<string>();
+    collectDynamoTableRefsInValue(pol, allResourceTypes, fromPol);
+    if (pol && typeof pol === 'object' && 'Ref' in pol && typeof (pol as { Ref: unknown }).Ref === 'string') {
+      const pid = (pol as { Ref: string }).Ref;
+      const extra = policyIdToTables.get(pid);
+      if (extra) for (const t of extra) fromPol.add(t);
+    }
+    for (const tid of fromPol) {
+      if (seenTableIds.has(tid)) continue;
+      seenTableIds.add(tid);
+      envRefs.push({ varName: `iamPolicy:${tid}`, refType: 'ref', targetLogicalId: tid });
+    }
+  }
+}
+
 function extractRef(
   value: unknown,
   allResourceTypes: Map<string, string>,
@@ -71,13 +141,21 @@ function extractRef(
     if (allResourceTypes.has(value)) {
       return { refType: 'ref', targetLogicalId: value };
     }
+    if (value.endsWith('TableName') || value.endsWith('TableArn')) {
+      return { refType: 'ref', targetLogicalId: value };
+    }
     return null;
   }
   if (!value || typeof value !== 'object') return null;
   const obj = value as Record<string, unknown>;
 
   if ('Ref' in obj && typeof obj.Ref === 'string') {
-    return allResourceTypes.has(obj.Ref) ? { refType: 'ref', targetLogicalId: obj.Ref } : null;
+    const ref = obj.Ref;
+    if (allResourceTypes.has(ref)) return { refType: 'ref', targetLogicalId: ref };
+    if (ref.endsWith('TableName') || ref.endsWith('TableArn')) {
+      return { refType: 'ref', targetLogicalId: ref };
+    }
+    return null;
   }
 
   if ('Fn::GetAtt' in obj) {
@@ -142,6 +220,11 @@ function parseSamEvent(
   return null;
 }
 
+/** Stable 16-char hash for a single IaC resource payload (not the whole template). */
+function hashResourcePayload(payload: unknown): string {
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16);
+}
+
 const samParser: IaCParser = {
   kind: 'aws-sam',
 
@@ -161,6 +244,7 @@ const samParser: IaCParser = {
     if (!doc || typeof doc !== 'object') return null;
     const root = doc as {
       Transform?: unknown;
+      Globals?: Record<string, unknown>;
       Resources?: Record<string, Record<string, unknown>>;
     };
 
@@ -172,10 +256,25 @@ const samParser: IaCParser = {
     const resources: InfraResource[] = [];
     const allResourceTypes = new Map<string, string>();
 
+    const globalFunc = root.Globals?.Function as Record<string, unknown> | undefined;
+    const globalVariables = (globalFunc?.Environment as Record<string, unknown> | undefined)?.Variables as
+      | Record<string, unknown>
+      | undefined;
+
     if (root.Resources && typeof root.Resources === 'object') {
       for (const [logicalId, res] of Object.entries(root.Resources)) {
         const type = (res?.Type as string) ?? 'other';
         allResourceTypes.set(logicalId, type);
+      }
+
+      const policyIdToTables = new Map<string, string[]>();
+      for (const [logicalId, res] of Object.entries(root.Resources)) {
+        const type = (res?.Type as string) ?? 'other';
+        if (type !== 'AWS::IAM::ManagedPolicy') continue;
+        const mpProps = (res?.Properties ?? {}) as Record<string, unknown>;
+        const set = new Set<string>();
+        collectDynamoTableRefsInValue(mpProps.PolicyDocument, allResourceTypes, set);
+        if (set.size > 0) policyIdToTables.set(logicalId, [...set].sort());
       }
 
       for (const [logicalId, res] of Object.entries(root.Resources)) {
@@ -189,16 +288,35 @@ const samParser: IaCParser = {
 
         const envVars: string[] = [];
         const envRefs: InfraEnvRef[] = [];
-        const env = (props.Environment as Record<string, unknown> | undefined)
+        const funcEnv = (props.Environment as Record<string, unknown> | undefined)
           ?.Variables as Record<string, unknown> | undefined;
-        if (env && typeof env === 'object') {
-          for (const [key, val] of Object.entries(env)) {
+        const mergedEnv: Record<string, unknown> | undefined =
+          globalVariables && typeof globalVariables === 'object'
+            ? { ...globalVariables, ...(funcEnv && typeof funcEnv === 'object' ? funcEnv : {}) }
+            : funcEnv && typeof funcEnv === 'object'
+              ? funcEnv
+              : undefined;
+        if (mergedEnv && typeof mergedEnv === 'object') {
+          for (const [key, val] of Object.entries(mergedEnv)) {
             envVars.push(key);
             const ref = extractRef(val, allResourceTypes);
             if (ref) {
               envRefs.push({ varName: key, ...ref });
             }
           }
+        }
+
+        if (kind === 'lambda') {
+          const seenTableIds = new Set(
+            envRefs.map(r => r.targetLogicalId).filter((x): x is string => Boolean(x)),
+          );
+          appendDynamoRefsFromLambdaPolicies(
+            props.Policies,
+            policyIdToTables,
+            allResourceTypes,
+            envRefs,
+            seenTableIds,
+          );
         }
 
         const triggers: InfraTrigger[] = [];
@@ -212,10 +330,13 @@ const samParser: IaCParser = {
           }
         }
 
+        const resourceContentHash = hashResourcePayload(res);
+
         resources.push({
           id: logicalId,
           kind,
           provider: 'aws',
+          contentHash: resourceContentHash,
           attributes,
           envVars: envVars.length > 0 ? envVars : undefined,
           triggers: triggers.length > 0 ? triggers : undefined,
@@ -243,7 +364,8 @@ const samParser: IaCParser = {
 
 /** Dir names to skip when scanning for infra files (build artifacts, deps, etc.). */
 const INFRA_SCAN_SKIP_DIRS = new Set([
-  'node_modules', '.git', '.aws-sam', 'dist', 'dist-bundled', '.next', '__tests__',
+  'node_modules', '.git', '.aws-sam', 'dist', 'dist-bundled', '.next', '__tests__', '__mocks__',
+  'tests', 'e2e', 'cypress', 'playwright', '__e2e__', '__snapshots__',
   'coverage', '.cache', 'build', '.turbo', '.nx',
 ]);
 
@@ -320,10 +442,12 @@ const dockerfileParser: IaCParser = {
     const baseImage = parseFirstFrom(content);
     const attrs: Record<string, string> = { domainPath };
     if (baseImage) attrs.baseImage = baseImage;
+    const dockerResourceBody = { id: parentDir, kind: 'dockerfile' as const, attributes: attrs };
     const resources: InfraResource[] = [{
       id: parentDir,
       kind: 'other',
       provider: 'generic',
+      contentHash: hashResourcePayload(dockerResourceBody),
       attributes: attrs,
     }];
     const id = `infra:dockerfile:${relPath}`;
@@ -369,10 +493,17 @@ const kubernetesParser: IaCParser = {
     const kindStr = d.kind ?? 'Unknown';
     const resKind: InfraResourceKind = k8sKindMap[kindStr] ?? 'k8s-crd';
     const name = d.metadata?.name ?? path.basename(filePath, path.extname(filePath));
+    const k8sResourceBody = {
+      id: name,
+      apiVersion: d.apiVersion,
+      kind: kindStr,
+      metadata: d.metadata,
+    };
     const resources: InfraResource[] = [{
       id: name,
       kind: resKind,
       provider: 'k8s',
+      contentHash: hashResourcePayload(k8sResourceBody),
       attributes: {
         apiVersion: String(d.apiVersion ?? ''),
         kind: kindStr,
@@ -406,10 +537,17 @@ const helmParser: IaCParser = {
     const d = doc as { name?: string; version?: string; appVersion?: string; description?: string };
     const contentHash = createHash('sha256').update(JSON.stringify(doc)).digest('hex').slice(0, 16);
     const name = d.name ?? path.basename(path.dirname(filePath));
+    const helmResourceBody = {
+      id: name,
+      name: d.name,
+      version: d.version,
+      appVersion: d.appVersion,
+    };
     const resources: InfraResource[] = [{
       id: name,
       kind: 'helm-release',
       provider: 'generic',
+      contentHash: hashResourcePayload(helmResourceBody),
       attributes: {
         ...(d.version ? { version: String(d.version) } : {}),
         ...(d.appVersion ? { appVersion: String(d.appVersion) } : {}),
@@ -430,7 +568,7 @@ const helmParser: IaCParser = {
 const parsers: IaCParser[] = [samParser, helmParser, kubernetesParser, dockerfileParser];
 
 export function collectInfraModules(options: InfraScanOptions): InfraModuleInfo[] {
-  const { repoRoot } = options;
+  const { repoRoot, excludePatterns } = options;
   const infraModules: InfraModuleInfo[] = [];
   const seenModuleId = new Set<string>();
 
@@ -439,6 +577,7 @@ export function collectInfraModules(options: InfraScanOptions): InfraModuleInfo[
   if (candidates.length === 0) return infraModules;
 
   for (const { filePath, relPath } of candidates) {
+    if (matchesInfraExclude(relPath, excludePatterns)) continue;
     let doc: unknown;
     const ext = path.extname(filePath).toLowerCase();
     const base = path.basename(filePath);
